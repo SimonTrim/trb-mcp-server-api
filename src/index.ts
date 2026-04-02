@@ -2,6 +2,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import express from "express";
+import cors from "cors";
 import { z } from "zod";
 
 import { workspaceApiDocs } from "./data/workspace-api.js";
@@ -411,9 +414,50 @@ server.tool(
 // ═══════════════════════════════════════
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Trimble Connect MCP Server running on stdio");
+  const isHttpMode = process.argv.includes("--http") || !!process.env.PORT;
+
+  if (isHttpMode) {
+    const app = express();
+    app.use(cors());
+
+    const transports: Record<string, SSEServerTransport> = {};
+
+    app.get("/sse", async (req, res) => {
+      const transport = new SSEServerTransport("/messages", res);
+      transports[transport.sessionId] = transport;
+
+      res.on("close", () => {
+        delete transports[transport.sessionId];
+      });
+
+      await server.connect(transport);
+    });
+
+    app.post("/messages", express.json(), async (req, res) => {
+      const sessionId = req.query.sessionId as string;
+      const transport = transports[sessionId];
+      if (!transport) {
+        res.status(400).json({ error: "No active session for this sessionId" });
+        return;
+      }
+      await transport.handlePostMessage(req, res);
+    });
+
+    app.get("/health", (_req, res) => {
+      res.json({ status: "ok", server: "trimble-connect-api", version: "1.0.0" });
+    });
+
+    const port = parseInt(process.env.PORT || "3001", 10);
+    app.listen(port, () => {
+      console.error(`Trimble Connect MCP Server (HTTP/SSE) running on:`);
+      console.error(`  SSE endpoint:  http://localhost:${port}/sse`);
+      console.error(`  Health check:  http://localhost:${port}/health`);
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("Trimble Connect MCP Server running on stdio");
+  }
 }
 
 main().catch((error) => {
