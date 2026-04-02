@@ -246,8 +246,9 @@ async function main() {
     app.use(cors());
     app.use(express.json());
 
-    // ── Streamable HTTP transport at / and /mcp ──
+    // ── Transport state ──
     const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
+    const sseTransports: Record<string, { server: McpServer; transport: SSEServerTransport }> = {};
 
     const handleMcpPost = async (req: express.Request, res: express.Response) => {
       try {
@@ -283,11 +284,16 @@ async function main() {
 
     const handleMcpGet = async (req: express.Request, res: express.Response) => {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
-        res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session ID" }, id: null });
+      if (sessionId && sessions.has(sessionId)) {
+        await sessions.get(sessionId)!.transport.handleRequest(req, res);
         return;
       }
-      await sessions.get(sessionId)!.transport.handleRequest(req, res);
+      // No session ID → SSE fallback (new connection)
+      const transport = new SSEServerTransport("/messages", res);
+      const sessionServer = createServer();
+      sseTransports[transport.sessionId] = { server: sessionServer, transport };
+      res.on("close", () => { delete sseTransports[transport.sessionId]; });
+      await sessionServer.connect(transport);
     };
 
     const handleMcpDelete = async (req: express.Request, res: express.Response) => {
@@ -308,9 +314,6 @@ async function main() {
     app.post("/", handleMcpPost);
     app.get("/", handleMcpGet);
     app.delete("/", handleMcpDelete);
-
-    // ── SSE transport (legacy) at /sse ──
-    const sseTransports: Record<string, { server: McpServer; transport: SSEServerTransport }> = {};
 
     app.get("/sse", async (req, res) => {
       const transport = new SSEServerTransport("/messages", res);
