@@ -699,10 +699,16 @@ async function main() {
 
     const port = parseInt(process.env.PORT || "3001", 10);
     app.listen(port, () => {
-      console.error(`Trimble Connect MCP Server (HTTP) running on:`);
-      console.error(`  Streamable HTTP:  http://localhost:${port}/mcp`);
-      console.error(`  SSE (legacy):     http://localhost:${port}/sse`);
-      console.error(`  Health check:     http://localhost:${port}/health`);
+      console.error(`Trimble Connect MCP Server (HTTP) running on port ${port}`);
+
+      // Keep-alive: ping ourselves every 13 minutes to prevent Render free tier from sleeping
+      const KEEP_ALIVE_MS = 13 * 60 * 1000;
+      const selfUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;
+      setInterval(async () => {
+        try {
+          await fetch(`${selfUrl}/health`);
+        } catch { /* ignore */ }
+      }, KEEP_ALIVE_MS);
     });
   } else {
     const stdioServer = createServer();
