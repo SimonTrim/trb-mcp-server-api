@@ -1,0 +1,33 @@
+{
+  "name": "trb-mcp-server-api",
+  "version": "1.0.0",
+  "description": "MCP Server exposing Trimble Connect for Browser APIs documentation — for AI-assisted extension development",
+  "main": "dist/index.js",
+  "bin": {
+    "trb-mcp-server-api": "dist/index.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "trimble-connect",
+    "bim",
+    "workspace-api",
+    "extension",
+    "model-context-protocol"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+.env
+Trimble_connect_api/
+PRD_Trimble_Connect_Extensions.md
+Property Set Trimble Connect.md
+agent-transcripts/
+terminals/
+assets/
