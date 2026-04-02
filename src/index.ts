@@ -246,10 +246,10 @@ async function main() {
     app.use(cors());
     app.use(express.json());
 
-    // ── Streamable HTTP transport at /mcp ──
+    // ── Streamable HTTP transport at / and /mcp ──
     const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
 
-    app.post("/mcp", async (req, res) => {
+    const handleMcpPost = async (req: express.Request, res: express.Response) => {
       try {
         const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -279,18 +279,18 @@ async function main() {
           res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(error) }, id: null });
         }
       }
-    });
+    };
 
-    app.get("/mcp", async (req, res) => {
+    const handleMcpGet = async (req: express.Request, res: express.Response) => {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       if (!sessionId || !sessions.has(sessionId)) {
         res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session ID" }, id: null });
         return;
       }
       await sessions.get(sessionId)!.transport.handleRequest(req, res);
-    });
+    };
 
-    app.delete("/mcp", async (req, res) => {
+    const handleMcpDelete = async (req: express.Request, res: express.Response) => {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       if (sessionId && sessions.has(sessionId)) {
         const { transport } = sessions.get(sessionId)!;
@@ -299,7 +299,15 @@ async function main() {
       } else {
         res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session ID" }, id: null });
       }
-    });
+    };
+
+    app.post("/mcp", handleMcpPost);
+    app.get("/mcp", handleMcpGet);
+    app.delete("/mcp", handleMcpDelete);
+
+    app.post("/", handleMcpPost);
+    app.get("/", handleMcpGet);
+    app.delete("/", handleMcpDelete);
 
     // ── SSE transport (legacy) at /sse ──
     const sseTransports: Record<string, { server: McpServer; transport: SSEServerTransport }> = {};
