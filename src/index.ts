@@ -3,8 +3,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import cors from "cors";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { workspaceApiDocs } from "./data/workspace-api.js";
@@ -419,23 +421,80 @@ async function main() {
   if (isHttpMode) {
     const app = express();
     app.use(cors());
+    app.use(express.json());
 
-    const transports: Record<string, SSEServerTransport> = {};
+    // ── Streamable HTTP transport at /mcp (for agent platforms) ──
+    const httpTransports = new Map<string, StreamableHTTPServerTransport>();
+
+    app.post("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (sessionId && httpTransports.has(sessionId)) {
+        const transport = httpTransports.get(sessionId)!;
+        await transport.handleRequest(req, res, req.body);
+        return;
+      }
+
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+      });
+
+      const sid = transport.sessionId!;
+      httpTransports.set(sid, transport);
+      transport.onclose = () => {
+        httpTransports.delete(sid);
+      };
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    app.get("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (!sessionId || !httpTransports.has(sessionId)) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: No valid session ID" },
+          id: null,
+        });
+        return;
+      }
+      const transport = httpTransports.get(sessionId)!;
+      await transport.handleRequest(req, res);
+    });
+
+    app.delete("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (sessionId && httpTransports.has(sessionId)) {
+        const transport = httpTransports.get(sessionId)!;
+        await transport.handleRequest(req, res);
+        httpTransports.delete(sessionId);
+      } else {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: No valid session ID" },
+          id: null,
+        });
+      }
+    });
+
+    // ── SSE transport (legacy) at /sse ──
+    const sseTransports: Record<string, SSEServerTransport> = {};
 
     app.get("/sse", async (req, res) => {
       const transport = new SSEServerTransport("/messages", res);
-      transports[transport.sessionId] = transport;
+      sseTransports[transport.sessionId] = transport;
 
       res.on("close", () => {
-        delete transports[transport.sessionId];
+        delete sseTransports[transport.sessionId];
       });
 
       await server.connect(transport);
     });
 
-    app.post("/messages", express.json(), async (req, res) => {
+    app.post("/messages", async (req, res) => {
       const sessionId = req.query.sessionId as string;
-      const transport = transports[sessionId];
+      const transport = sseTransports[sessionId];
       if (!transport) {
         res.status(400).json({ error: "No active session for this sessionId" });
         return;
@@ -443,15 +502,17 @@ async function main() {
       await transport.handlePostMessage(req, res);
     });
 
+    // ── Health check ──
     app.get("/health", (_req, res) => {
       res.json({ status: "ok", server: "trimble-connect-api", version: "1.0.0" });
     });
 
     const port = parseInt(process.env.PORT || "3001", 10);
     app.listen(port, () => {
-      console.error(`Trimble Connect MCP Server (HTTP/SSE) running on:`);
-      console.error(`  SSE endpoint:  http://localhost:${port}/sse`);
-      console.error(`  Health check:  http://localhost:${port}/health`);
+      console.error(`Trimble Connect MCP Server (HTTP) running on:`);
+      console.error(`  Streamable HTTP:  http://localhost:${port}/mcp`);
+      console.error(`  SSE (legacy):     http://localhost:${port}/sse`);
+      console.error(`  Health check:     http://localhost:${port}/health`);
     });
   } else {
     const transport = new StdioServerTransport();
