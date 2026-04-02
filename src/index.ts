@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "node:crypto";
@@ -247,35 +248,46 @@ async function main() {
     app.use(express.json());
 
     // ── Transport state ──
-    const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
+    const transports: Record<string, StreamableHTTPServerTransport> = {};
     const sseTransports: Record<string, { server: McpServer; transport: SSEServerTransport }> = {};
 
     const handleMcpPost = async (req: express.Request, res: express.Response) => {
       try {
         const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-        if (sessionId && sessions.has(sessionId)) {
-          const { transport } = sessions.get(sessionId)!;
+        if (sessionId && transports[sessionId]) {
+          await transports[sessionId].handleRequest(req, res, req.body);
+          return;
+        }
+
+        if (!sessionId && isInitializeRequest(req.body)) {
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (sid) => {
+              transports[sid] = transport;
+            },
+          });
+
+          transport.onclose = () => {
+            const sid = transport.sessionId;
+            if (sid && transports[sid]) {
+              delete transports[sid];
+            }
+          };
+
+          const sessionServer = createServer();
+          await sessionServer.connect(transport);
           await transport.handleRequest(req, res, req.body);
           return;
         }
 
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+          id: null,
         });
-
-        const sid = transport.sessionId!;
-        const sessionServer = createServer();
-        sessions.set(sid, { server: sessionServer, transport });
-
-        transport.onclose = () => {
-          sessions.delete(sid);
-        };
-
-        await sessionServer.connect(transport);
-        await transport.handleRequest(req, res, req.body);
       } catch (error) {
-        console.error("POST /mcp error:", error);
+        console.error("POST error:", error);
         if (!res.headersSent) {
           res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(error) }, id: null });
         }
@@ -284,11 +296,10 @@ async function main() {
 
     const handleMcpGet = async (req: express.Request, res: express.Response) => {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (sessionId && sessions.has(sessionId)) {
-        await sessions.get(sessionId)!.transport.handleRequest(req, res);
+      if (sessionId && transports[sessionId]) {
+        await transports[sessionId].handleRequest(req, res);
         return;
       }
-      // No session ID → SSE fallback (new connection)
       const transport = new SSEServerTransport("/messages", res);
       const sessionServer = createServer();
       sseTransports[transport.sessionId] = { server: sessionServer, transport };
@@ -298,12 +309,15 @@ async function main() {
 
     const handleMcpDelete = async (req: express.Request, res: express.Response) => {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (sessionId && sessions.has(sessionId)) {
-        const { transport } = sessions.get(sessionId)!;
-        await transport.handleRequest(req, res);
-        sessions.delete(sessionId);
+      if (sessionId && transports[sessionId]) {
+        await transports[sessionId].handleRequest(req, res);
+        delete transports[sessionId];
       } else {
-        res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session ID" }, id: null });
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: No valid session ID" },
+          id: null,
+        });
       }
     };
 
