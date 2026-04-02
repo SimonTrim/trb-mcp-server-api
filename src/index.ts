@@ -427,26 +427,37 @@ async function main() {
     const httpTransports = new Map<string, StreamableHTTPServerTransport>();
 
     app.post("/mcp", async (req, res) => {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      try {
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-      if (sessionId && httpTransports.has(sessionId)) {
-        const transport = httpTransports.get(sessionId)!;
+        if (sessionId && httpTransports.has(sessionId)) {
+          const transport = httpTransports.get(sessionId)!;
+          await transport.handleRequest(req, res, req.body);
+          return;
+        }
+
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+        });
+
+        const sid = transport.sessionId!;
+        httpTransports.set(sid, transport);
+        transport.onclose = () => {
+          httpTransports.delete(sid);
+        };
+
+        await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
-        return;
+      } catch (error) {
+        console.error("POST /mcp error:", error);
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: String(error) },
+            id: null,
+          });
+        }
       }
-
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-      });
-
-      const sid = transport.sessionId!;
-      httpTransports.set(sid, transport);
-      transport.onclose = () => {
-        httpTransports.delete(sid);
-      };
-
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
     });
 
     app.get("/mcp", async (req, res) => {
