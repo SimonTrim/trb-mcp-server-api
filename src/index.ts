@@ -9,6 +9,17 @@ import express from "express";
 import cors from "cors";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import {
+  tcApiCall,
+  storeSessionToken,
+  getSessionToken,
+  clearSessionToken,
+  type Region,
+  type ApiType,
+  VALID_REGIONS,
+  getCoreBaseUrl,
+  getBcfBaseUrl,
+} from "./tc-api-client.js";
 
 import { workspaceApiDocs } from "./data/workspace-api.js";
 import { restApiDocs } from "./data/rest-api.js";
@@ -232,6 +243,330 @@ function createServer(): McpServer {
     }
   );
 
+  // ═══════════════════════════════════════════════════
+  // API EXECUTION TOOLS — Call Trimble Connect APIs
+  // ═══════════════════════════════════════════════════
+
+  const regionEnum = z.enum(["us", "eu", "ap", "ap-au"]).describe("Trimble Connect region: us (North America), eu (Europe), ap (Asia-Pacific), ap-au (Australia)");
+
+  function getToken(extra: { sessionId?: string }): string {
+    const token = extra.sessionId ? getSessionToken(extra.sessionId) : undefined;
+    if (!token) throw new Error("No auth token available. Configure the MCP tool in Trimble Agent Studio with an Authorization header: Bearer {actorToken?scopes=openid tc}");
+    return token;
+  }
+
+  srv.tool(
+    "tc_api_call",
+    "Execute any Trimble Connect REST API call. Use the documentation tools first to find the right endpoint, then use this tool to execute it. Supports Core API and BCF API.",
+    {
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method"),
+      region: regionEnum,
+      path: z.string().describe("API path (e.g. /projects, /files/{fileId}, /todos). Do NOT include the base URL."),
+      apiType: z.enum(["core", "bcf"]).default("core").describe("API type: core (/tc/api/2.0) or bcf (/bcf/2.1)"),
+      query: z.record(z.string(), z.string()).optional().describe("Query parameters as key-value pairs (e.g. {projectId: '...', type: 'FILE'})"),
+      body: z.any().optional().describe("Request body for POST/PUT/PATCH (JSON object)"),
+    },
+    async ({ method, region, path, apiType, query, body }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method, region: region as Region, path, apiType: apiType as ApiType, query, body, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      const summary = `${method} ${path} → ${result.status} ${result.statusText}`;
+      if (result.status >= 400) {
+        return { content: [{ type: "text" as const, text: `ERROR: ${summary}\n\n${text}` }], isError: true };
+      }
+      return { content: [{ type: "text" as const, text: `${summary}\n\n${text}` }] };
+    }
+  );
+
+  srv.tool(
+    "tc_get_regions",
+    "Get all available Trimble Connect regions and their API base URLs. Call this first to determine which region a project is in.",
+    {},
+    async (_args, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: "us", path: "/regions", authToken: token });
+      const regionInfo = VALID_REGIONS.map((r) => `- **${r}**: Core=${getCoreBaseUrl(r as Region)}, BCF=${getBcfBaseUrl(r as Region)}`).join("\n");
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: `# Trimble Connect Regions\n\n${regionInfo}\n\n## API Response:\n${text}` }] };
+    }
+  );
+
+  srv.tool(
+    "tc_get_current_user",
+    "Get the current authenticated user's profile information.",
+    { region: regionEnum.default("us") },
+    async ({ region }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: "/users/me", authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_list_projects",
+    "List all projects the authenticated user has access to in a given region.",
+    {
+      region: regionEnum,
+      fullyLoaded: z.boolean().default(false).describe("If true, return full project details including rootId"),
+    },
+    async ({ region, fullyLoaded }, extra) => {
+      const token = getToken(extra);
+      const query: Record<string, string> = {};
+      if (fullyLoaded) query.fullyLoaded = "true";
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: "/projects", query, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_get_project",
+    "Get details of a specific project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+    },
+    async ({ region, projectId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: `/projects/${projectId}`, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_create_project",
+    "Create a new project in Trimble Connect.",
+    {
+      region: regionEnum,
+      name: z.string().describe("Project name"),
+      description: z.string().optional().describe("Project description"),
+    },
+    async ({ region, name, description }, extra) => {
+      const token = getToken(extra);
+      const body: Record<string, string> = { name };
+      if (description) body.description = description;
+      const result = await tcApiCall({ method: "POST", region: region as Region, path: "/projects", body, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_list_project_users",
+    "List all members of a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+    },
+    async ({ region, projectId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: `/projects/${projectId}/users`, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_search_files",
+    "Search for files in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+      query: z.string().default("*").describe("Search query (use * for all files)"),
+      type: z.enum(["FILE", "FOLDER"]).default("FILE").describe("Object type to search for"),
+    },
+    async ({ region, projectId, query: q, type: t }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: "/search", query: { query: q, projectId, type: t }, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_get_folder_contents",
+    "List the contents (files and subfolders) of a folder.",
+    {
+      region: regionEnum,
+      folderId: z.string().describe("Folder ID (use project's rootId for root folder)"),
+    },
+    async ({ region, folderId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: `/folders/${folderId}/items`, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_get_file",
+    "Get details of a specific file including versions and download URL.",
+    {
+      region: regionEnum,
+      fileId: z.string().describe("File ID"),
+      includeDownloadUrl: z.boolean().default(false).describe("If true, also fetch the download URL"),
+    },
+    async ({ region, fileId, includeDownloadUrl }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: `/files/${fileId}`, authToken: token });
+      let text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      if (includeDownloadUrl) {
+        const dlResult = await tcApiCall({ method: "GET", region: region as Region, path: `/files/${fileId}/downloadurl`, authToken: token });
+        const dlText = typeof dlResult.body === "string" ? dlResult.body : JSON.stringify(dlResult.body, null, 2);
+        text += `\n\n## Download URL:\n${dlText}`;
+      }
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_list_todos",
+    "List all todos/notes in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+    },
+    async ({ region, projectId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: "/todos", query: { projectId }, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_create_todo",
+    "Create a new todo/note in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+      label: z.string().describe("Todo title"),
+      description: z.string().optional().describe("Todo description/content"),
+    },
+    async ({ region, projectId, label, description }, extra) => {
+      const token = getToken(extra);
+      const body: Record<string, unknown> = { label, projectId };
+      if (description) body.description = description;
+      const result = await tcApiCall({ method: "POST", region: region as Region, path: "/todos", body, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_update_todo",
+    "Update an existing todo/note.",
+    {
+      region: regionEnum,
+      todoId: z.string().describe("Todo ID"),
+      label: z.string().optional().describe("New title"),
+      description: z.string().optional().describe("New description"),
+      done: z.boolean().optional().describe("Mark as done or not done"),
+    },
+    async ({ region, todoId, label, description, done }, extra) => {
+      const token = getToken(extra);
+      const body: Record<string, unknown> = {};
+      if (label !== undefined) body.label = label;
+      if (description !== undefined) body.description = description;
+      if (done !== undefined) body.done = done;
+      const result = await tcApiCall({ method: "PUT", region: region as Region, path: `/todos/${todoId}`, body, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_list_views",
+    "List all 3D views saved in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+    },
+    async ({ region, projectId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: "/views", query: { projectId }, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_list_clashsets",
+    "List all clash sets in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+    },
+    async ({ region, projectId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: "/clashsets", query: { projectId }, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_list_activities",
+    "List recent activities in a project (audit trail).",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+      pageSize: z.number().default(20).describe("Number of activities to return"),
+    },
+    async ({ region, projectId, pageSize }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({
+        method: "POST", region: region as Region, path: "/activities/list",
+        body: { objectType: "PROJECT", objectId: projectId, pageSize },
+        authToken: token,
+      });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_bcf_list_topics",
+    "List BCF topics (issues) in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+    },
+    async ({ region, projectId }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({ method: "GET", region: region as Region, path: `/projects/${projectId}/topics`, apiType: "bcf", authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.tool(
+    "tc_bcf_create_topic",
+    "Create a new BCF topic (issue) in a project.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Project ID"),
+      title: z.string().describe("Topic title"),
+      description: z.string().optional().describe("Topic description"),
+      topicType: z.string().optional().describe("Topic type (e.g. 'Issue', 'Request', 'Comment')"),
+      priority: z.string().optional().describe("Priority (e.g. 'Critical', 'Major', 'Normal', 'Minor')"),
+      assignedTo: z.string().optional().describe("Email of the user to assign the topic to"),
+    },
+    async ({ region, projectId, title, description, topicType, priority, assignedTo }, extra) => {
+      const token = getToken(extra);
+      const body: Record<string, unknown> = { title };
+      if (description) body.description = description;
+      if (topicType) body.topic_type = topicType;
+      if (priority) body.priority = priority;
+      if (assignedTo) body.assigned_to = assignedTo;
+      const result = await tcApiCall({ method: "POST", region: region as Region, path: `/projects/${projectId}/topics`, apiType: "bcf", body, authToken: token });
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
   return srv;
 }
 
@@ -255,6 +590,13 @@ async function main() {
       try {
         const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
+        // Capture auth token from every request (Agent Studio injects it)
+        const authHeader = req.headers["authorization"] as string | undefined;
+        if (authHeader && sessionId) {
+          const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+          storeSessionToken(sessionId, token);
+        }
+
         if (sessionId && transports[sessionId]) {
           await transports[sessionId].handleRequest(req, res, req.body);
           return;
@@ -265,13 +607,19 @@ async function main() {
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid) => {
               transports[sid] = transport;
+              // Store token for the new session too
+              if (authHeader) {
+                const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+                storeSessionToken(sid, token);
+              }
             },
           });
 
           transport.onclose = () => {
             const sid = transport.sessionId;
-            if (sid && transports[sid]) {
+            if (sid) {
               delete transports[sid];
+              clearSessionToken(sid);
             }
           };
 
