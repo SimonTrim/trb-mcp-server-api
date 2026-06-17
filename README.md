@@ -45,12 +45,18 @@ This MCP server provides structured, searchable documentation for **200+ API end
 
 - The HTML connects to the host via `@modelcontextprotocol/ext-apps` (loaded from `https://esm.sh`).
 - Initial context is pushed to the app through the tool's `structuredContent`.
-- The create form calls back the server tool `tc_bcf_create_topic` via `callServerTool` on submit,
-  so all BCF creation logic stays server-side (no duplication).
+- The create form has two submit paths:
+  - **Without 3D viewpoint**: calls the server tool `tc_bcf_create_topic` via `callServerTool`
+    (immediate, server-side, no duplication of logic).
+  - **With current 3D viewpoint** (checkbox, default on): calls `sendMessage` to ask the agent to
+    create the BCF through the **host application's** `create_bcf_topic` tool, which captures the live
+    camera + snapshot + loaded models. This uses only the standard MCP Apps SDK.
 - CSP allow-list (`esm.sh`) is declared in the resource `_meta.ui.csp`.
 
-Future enhancement: use the Trimble host-proxy extension (`callLocalTool`) to enrich a BCF with the
-current 3D viewpoint/selection from the embedding host application.
+> Note: the Trimble host-proxy extension (`callLocalTool` from `@trimble-agentic/agentic-mcp-app-tools`)
+> would let the app call host tools directly, but that package is private (not on public npm/esm.sh),
+> so it cannot be imported into a server-served HTML app. The `sendMessage` delegation above achieves
+> the same outcome (viewpoint capture in the host) using only the public SDK.
 
 ## Installation
 

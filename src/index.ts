@@ -372,6 +372,9 @@ function createBcfCreateAppHtml(): string {
     .banner.show { display: block; }
     .banner.success { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
     .banner.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .checkbox { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #334155; font-weight: 500; }
+    .checkbox input { width: auto; }
+    .checkbox.hidden { display: none; }
     @media (max-width: 480px) { .row { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -405,6 +408,10 @@ function createBcfCreateAppHtml(): string {
         <label for="assignedTo">Assigné à</label>
         <select id="assignedTo" name="assignedTo"><option value="">— Personne —</option></select>
       </div>
+      <label class="checkbox" id="viewpointField">
+        <input id="attachViewpoint" name="attachViewpoint" type="checkbox" checked />
+        <span>Joindre le point de vue 3D actuel (caméra + capture d'écran)</span>
+      </label>
       <div class="actions">
         <button id="submitBtn" class="primary" type="submit">Créer le BCF</button>
       </div>
@@ -422,6 +429,8 @@ function createBcfCreateAppHtml(): string {
       topicType: document.getElementById('topicType'),
       priority: document.getElementById('priority'),
       assignedTo: document.getElementById('assignedTo'),
+      attachViewpoint: document.getElementById('attachViewpoint'),
+      viewpointField: document.getElementById('viewpointField'),
       submitBtn: document.getElementById('submitBtn'),
     };
 
@@ -465,6 +474,10 @@ function createBcfCreateAppHtml(): string {
         mcpApp = new App({ name: 'Trimble Connect BCF Create', version: '1.0.0' });
         mcpApp.ontoolresult = ({ structuredContent }) => applyContext(structuredContent);
         await mcpApp.connect(new PostMessageTransport(window.parent));
+        if (!mcpApp.sendMessage) {
+          els.attachViewpoint.checked = false;
+          els.viewpointField.classList.add('hidden');
+        }
       } catch (error) {
         setBanner('error', "SDK MCP Apps non chargé. Utilisez la commande texte de création BCF dans le chat.");
         console.error(error);
@@ -478,34 +491,73 @@ function createBcfCreateAppHtml(): string {
       if (structured) applyContext(structured);
     });
 
+    function collectFields() {
+      const fields = { title: els.title.value.trim() };
+      const description = els.description.value.trim();
+      if (description) fields.description = description;
+      if (els.topicType.value) fields.topicType = els.topicType.value;
+      if (els.priority.value) fields.priority = els.priority.value;
+      if (els.assignedTo.value) fields.assignedTo = els.assignedTo.value;
+      return fields;
+    }
+
+    // Path A — server-side creation (metadata only, no 3D viewpoint).
+    async function createOnServer(fields) {
+      const result = await mcpApp.callServerTool({
+        name: 'tc_bcf_create_topic',
+        arguments: { region: ctx.region, projectId: ctx.projectId, ...fields },
+      });
+      const resultText = (result?.content || []).map(c => c.text).filter(Boolean).join('\n');
+      if (result?.isError) {
+        setBanner('error', "Échec de la création: " + (resultText || 'erreur inconnue'));
+        return;
+      }
+      setBanner('success', "BCF « " + fields.title + " » créé avec succès.");
+      els.form.reset();
+      applyContext(ctx);
+    }
+
+    // Path B — delegate to the agent so it runs the HOST tool that captures the
+    // live 3D viewpoint (camera + snapshot). Uses only the standard MCP Apps SDK.
+    async function createViaHostWithViewpoint(fields) {
+      const lines = [
+        "Crée un BCF (topic) dans Trimble Connect en joignant le point de vue 3D ACTUEL (caméra + capture d'écran) via l'outil de création BCF de l'application hôte.",
+        "Projet: " + ctx.projectId + " (région " + ctx.region + ").",
+        "Titre: " + fields.title + ".",
+      ];
+      if (fields.description) lines.push("Description: " + fields.description + ".");
+      if (fields.topicType) lines.push("Type: " + fields.topicType + ".");
+      if (fields.priority) lines.push("Priorité: " + fields.priority + ".");
+      if (fields.assignedTo) lines.push("Assigné à: " + fields.assignedTo + ".");
+      await mcpApp.sendMessage({ role: 'user', content: [{ type: 'text', text: lines.join('\n') }] });
+      setBanner('success', "Demande envoyée à l'agent : il va créer le BCF « " + fields.title + " » avec le point de vue 3D courant.");
+      els.form.reset();
+      applyContext(ctx);
+    }
+
     els.form.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!ctx) { setBanner('error', "Contexte projet indisponible."); return; }
-      const title = els.title.value.trim();
-      if (!title) { setBanner('error', "Le titre est obligatoire."); return; }
-      if (!mcpApp?.callServerTool) { setBanner('error', "Connexion à l'agent indisponible."); return; }
+      const fields = collectFields();
+      if (!fields.title) { setBanner('error', "Le titre est obligatoire."); return; }
+
+      const wantsViewpoint = els.attachViewpoint.checked;
+      if (wantsViewpoint && !mcpApp?.sendMessage) {
+        setBanner('error', "Capture du point de vue indisponible. Décochez l'option pour créer sans vue 3D.");
+        return;
+      }
+      if (!wantsViewpoint && !mcpApp?.callServerTool) {
+        setBanner('error', "Connexion à l'agent indisponible.");
+        return;
+      }
 
       els.submitBtn.disabled = true;
-      setBanner('success', "Création du BCF en cours...");
+      setBanner('success', wantsViewpoint ? "Envoi de la demande (point de vue 3D)..." : "Création du BCF en cours...");
       try {
-        const args = { region: ctx.region, projectId: ctx.projectId, title };
-        const description = els.description.value.trim();
-        if (description) args.description = description;
-        if (els.topicType.value) args.topicType = els.topicType.value;
-        if (els.priority.value) args.priority = els.priority.value;
-        if (els.assignedTo.value) args.assignedTo = els.assignedTo.value;
-
-        const result = await mcpApp.callServerTool({ name: 'tc_bcf_create_topic', arguments: args });
-        const resultText = (result?.content || []).map(c => c.text).filter(Boolean).join('\n');
-        if (result?.isError) {
-          setBanner('error', "Échec de la création: " + (resultText || 'erreur inconnue'));
+        if (wantsViewpoint) {
+          await createViaHostWithViewpoint(fields);
         } else {
-          setBanner('success', "BCF « " + title + " » créé avec succès.");
-          els.form.reset();
-          applyContext(ctx);
-          if (mcpApp.sendMessage) {
-            await mcpApp.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Le BCF « ' + title + ' » vient d\'être créé via le formulaire.' }] });
-          }
+          await createOnServer(fields);
         }
       } catch (error) {
         setBanner('error', "Erreur: " + (error?.message || String(error)));
@@ -1194,7 +1246,7 @@ function createServer(): McpServer {
     "tc_bcf_create_app",
     {
       title: "Ouvrir le formulaire de création BCF",
-      description: "Show an interactive MCP App form to create a Trimble Connect BCF topic. Use this when the user wants to create/open/fill a BCF, an issue, or a topic via a form. Optional fields prefill the form.",
+      description: "Show an interactive MCP App form to create a Trimble Connect BCF topic. Use this when the user wants to create/open/fill a BCF, an issue, or a topic via a form. Optional fields prefill the form. The form can optionally attach the current 3D viewpoint (camera + snapshot) by delegating creation to the host application's BCF tool.",
       inputSchema: {
         region: regionEnum,
         projectId: z.string().describe("Trimble Connect project ID"),
