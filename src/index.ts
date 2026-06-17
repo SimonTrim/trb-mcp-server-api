@@ -47,6 +47,479 @@ interface DocSection {
   content: string;
 }
 
+const BCF_DASHBOARD_APP_URI = "ui://trimble-connect/bcf-dashboard.html";
+const BCF_CREATE_APP_URI = "ui://trimble-connect/bcf-create.html";
+
+type BcfTopicSummary = {
+  guid: string;
+  title: string;
+  status: string;
+  priority: string;
+  type: string;
+  assignedTo: string;
+  created: string;
+  modified: string;
+};
+
+type BcfDashboardData = {
+  projectId: string;
+  region: string;
+  generatedAt: string;
+  total: number;
+  showing: number;
+  counts: {
+    byStatus: Record<string, number>;
+    byPriority: Record<string, number>;
+    byType: Record<string, number>;
+  };
+  topics: BcfTopicSummary[];
+};
+
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) return value.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null);
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    const candidates = [record.items, record.topics, record.data, record.results];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) {
+        return candidate.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null);
+      }
+    }
+  }
+  return [];
+}
+
+function toText(value: unknown, fallback = "-"): string {
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value);
+}
+
+function toDateText(value: unknown): string {
+  const text = toText(value, "");
+  return text ? text.substring(0, 10) : "-";
+}
+
+function incrementCount(target: Record<string, number>, key: string): void {
+  target[key] = (target[key] ?? 0) + 1;
+}
+
+function buildBcfDashboardData(projectId: string, region: string, rawTopics: unknown, limit: number): BcfDashboardData {
+  const topics = asRecordArray(rawTopics);
+  const summaries = topics.map((topic) => ({
+    guid: toText(topic.guid ?? topic.id),
+    title: toText(topic.title, "(sans titre)"),
+    status: toText(topic.topic_status ?? topic.status),
+    priority: toText(topic.priority),
+    type: toText(topic.topic_type ?? topic.type),
+    assignedTo: toText(topic.assigned_to ?? topic.assignee ?? topic.assignedTo),
+    created: toDateText(topic.creation_date ?? topic.created ?? topic.created_at),
+    modified: toDateText(topic.modified_date ?? topic.modified ?? topic.modified_at),
+  }));
+
+  const counts = {
+    byStatus: {} as Record<string, number>,
+    byPriority: {} as Record<string, number>,
+    byType: {} as Record<string, number>,
+  };
+
+  for (const topic of summaries) {
+    incrementCount(counts.byStatus, topic.status);
+    incrementCount(counts.byPriority, topic.priority);
+    incrementCount(counts.byType, topic.type);
+  }
+
+  return {
+    projectId,
+    region,
+    generatedAt: new Date().toISOString(),
+    total: summaries.length,
+    showing: Math.min(limit, summaries.length),
+    counts,
+    topics: summaries.slice(0, limit),
+  };
+}
+
+function createBcfDashboardAppHtml(): string {
+  return String.raw`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trimble Connect BCF Dashboard</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Open Sans", Arial, sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #1e293b; }
+    .app { padding: 14px; }
+    .header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    h1 { font-size: 16px; line-height: 1.2; margin: 0 0 4px; }
+    .muted { color: #64748b; font-size: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .card { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+    .card strong { display: block; font-size: 18px; margin-bottom: 2px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+    input, select, button { border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 12px; padding: 7px 9px; }
+    input { flex: 1 1 160px; min-width: 0; }
+    button { cursor: pointer; font-weight: 600; }
+    button.primary { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    table { width: 100%; border-collapse: collapse; background: white; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; font-size: 12px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+    th { background: #f1f5f9; color: #334155; font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    .pill { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #e0f2fe; color: #0369a1; white-space: nowrap; }
+    .empty, .error { padding: 18px; border: 1px dashed #cbd5e1; border-radius: 10px; background: white; color: #64748b; }
+    .error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+    @media (max-width: 520px) { .cards { grid-template-columns: 1fr; } th:nth-child(5), td:nth-child(5) { display: none; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <div class="header">
+      <div>
+        <h1>Dashboard BCF Trimble Connect</h1>
+        <div class="muted" id="subtitle">En attente des données...</div>
+      </div>
+      <button id="refreshBtn" class="primary" type="button">Rafraîchir</button>
+    </div>
+    <section class="cards">
+      <div class="card"><strong id="total">-</strong><span class="muted">BCF au total</span></div>
+      <div class="card"><strong id="openCount">-</strong><span class="muted">Ouverts / New</span></div>
+      <div class="card"><strong id="highCount">-</strong><span class="muted">Priorité haute</span></div>
+    </section>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Filtrer par titre, statut, priorité..." />
+      <select id="statusFilter"><option value="">Tous les statuts</option></select>
+      <button id="askBtn" type="button">Demander une analyse</button>
+    </div>
+    <div id="tableWrap" class="empty">Les données du tool vont s'afficher ici.</div>
+  </main>
+  <script type="module">
+    let mcpApp = null;
+    let dashboardData = null;
+    const els = {
+      subtitle: document.getElementById('subtitle'),
+      total: document.getElementById('total'),
+      openCount: document.getElementById('openCount'),
+      highCount: document.getElementById('highCount'),
+      search: document.getElementById('search'),
+      statusFilter: document.getElementById('statusFilter'),
+      tableWrap: document.getElementById('tableWrap'),
+      refreshBtn: document.getElementById('refreshBtn'),
+      askBtn: document.getElementById('askBtn'),
+    };
+
+    function countMatching(record, needles) {
+      return Object.entries(record || {}).reduce((sum, [key, count]) => needles.some(n => key.toLowerCase().includes(n)) ? sum + count : sum, 0);
+    }
+
+    function render(data) {
+      if (!data) return;
+      dashboardData = data;
+      els.subtitle.textContent = 'Projet ' + data.projectId + ' - région ' + data.region + ' - généré le ' + new Date(data.generatedAt).toLocaleString('fr-FR');
+      els.total.textContent = data.total ?? 0;
+      els.openCount.textContent = countMatching(data.counts?.byStatus, ['new', 'open', 'ouvert']);
+      els.highCount.textContent = countMatching(data.counts?.byPriority, ['high', 'critical', 'haute', 'critique']);
+
+      const statuses = Object.keys(data.counts?.byStatus || {}).sort();
+      els.statusFilter.innerHTML = '<option value="">Tous les statuts</option>' + statuses.map(s => '<option value="' + escapeHtml(s) + '">' + escapeHtml(s) + '</option>').join('');
+      renderTable();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+
+    function renderTable() {
+      const data = dashboardData;
+      if (!data) return;
+      const query = els.search.value.trim().toLowerCase();
+      const status = els.statusFilter.value;
+      const rows = (data.topics || []).filter(topic => {
+        const text = [topic.title, topic.status, topic.priority, topic.type, topic.assignedTo].join(' ').toLowerCase();
+        return (!query || text.includes(query)) && (!status || topic.status === status);
+      });
+      if (rows.length === 0) {
+        els.tableWrap.className = 'empty';
+        els.tableWrap.textContent = 'Aucun BCF ne correspond au filtre.';
+        return;
+      }
+      els.tableWrap.className = '';
+      els.tableWrap.innerHTML = '<table><thead><tr><th>Titre</th><th>Statut</th><th>Priorité</th><th>Type</th><th>Assigné à</th><th>Créé</th></tr></thead><tbody>' +
+        rows.map(topic => '<tr>' +
+          '<td><strong>' + escapeHtml(topic.title) + '</strong><div class="muted">' + escapeHtml(topic.guid) + '</div></td>' +
+          '<td><span class="pill">' + escapeHtml(topic.status) + '</span></td>' +
+          '<td>' + escapeHtml(topic.priority) + '</td>' +
+          '<td>' + escapeHtml(topic.type) + '</td>' +
+          '<td>' + escapeHtml(topic.assignedTo) + '</td>' +
+          '<td>' + escapeHtml(topic.created) + '</td>' +
+        '</tr>').join('') + '</tbody></table>';
+    }
+
+    async function connectMcpApp() {
+      try {
+        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const { App, PostMessageTransport } = mod;
+        mcpApp = new App({ name: 'Trimble Connect BCF Dashboard', version: '1.0.0' });
+        mcpApp.ontoolinput = () => {
+          els.tableWrap.className = 'empty';
+          els.tableWrap.textContent = 'Chargement des BCF...';
+        };
+        mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
+        mcpApp.ontoolcancelled = ({ reason }) => {
+          els.tableWrap.className = 'error';
+          els.tableWrap.textContent = 'Exécution annulée: ' + reason;
+        };
+        await mcpApp.connect(new PostMessageTransport(window.parent));
+      } catch (error) {
+        els.tableWrap.className = 'error';
+        els.tableWrap.textContent = 'MCP Apps SDK non chargé. Le résumé texte reste disponible dans le chat.';
+        console.error(error);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      const params = msg?.params || {};
+      const structured = params.structuredContent || params.result?.structuredContent;
+      if (structured) render(structured);
+    });
+
+    els.search.addEventListener('input', renderTable);
+    els.statusFilter.addEventListener('change', renderTable);
+    els.refreshBtn.addEventListener('click', async () => {
+      if (!dashboardData || !mcpApp?.callServerTool) return;
+      const result = await mcpApp.callServerTool({
+        name: 'tc_bcf_dashboard_app',
+        arguments: { region: dashboardData.region, projectId: dashboardData.projectId, limit: dashboardData.showing || 30 },
+      });
+      if (!result.isError && result.structuredContent) render(result.structuredContent);
+    });
+    els.askBtn.addEventListener('click', async () => {
+      if (!mcpApp?.sendMessage || !dashboardData) return;
+      await mcpApp.sendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: 'Analyse ce dashboard BCF et donne-moi les priorités d’action.' }],
+      });
+    });
+
+    connectMcpApp();
+  </script>
+</body>
+</html>`;
+}
+
+type BcfCreateContext = {
+  region: string;
+  projectId: string;
+  prefill: {
+    title: string;
+    description: string;
+    topicType: string;
+    priority: string;
+    assignedTo: string;
+  };
+  extensions: {
+    topicTypes: string[];
+    priorities: string[];
+    statuses: string[];
+  };
+  users: { email: string; name: string }[];
+};
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function buildBcfCreateUsers(rawUsers: unknown): { email: string; name: string }[] {
+  const records = asRecordArray(rawUsers);
+  return records
+    .map((user) => {
+      const email = toText(user.email ?? user.id, "");
+      const first = toText(user.firstName ?? user.first_name, "");
+      const last = toText(user.lastName ?? user.last_name, "");
+      const fullName = `${first} ${last}`.trim();
+      const name = fullName || toText(user.name, email);
+      return { email, name };
+    })
+    .filter((user) => user.email !== "");
+}
+
+function createBcfCreateAppHtml(): string {
+  return String.raw`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Créer un BCF Trimble Connect</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Open Sans", Arial, sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #1e293b; }
+    .app { padding: 14px; }
+    .header { margin-bottom: 12px; }
+    h1 { font-size: 16px; line-height: 1.2; margin: 0 0 4px; }
+    .muted { color: #64748b; font-size: 12px; }
+    form { display: grid; gap: 10px; }
+    .field { display: grid; gap: 4px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    label { font-size: 12px; font-weight: 600; color: #334155; }
+    input, select, textarea { border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 13px; padding: 8px 9px; width: 100%; box-sizing: border-box; }
+    textarea { min-height: 70px; resize: vertical; }
+    .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+    button { cursor: pointer; font-weight: 600; border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 13px; padding: 8px 14px; }
+    button.primary { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .banner { padding: 10px 12px; border-radius: 8px; font-size: 12px; display: none; }
+    .banner.show { display: block; }
+    .banner.success { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
+    .banner.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    @media (max-width: 480px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <div class="header">
+      <h1>Créer un BCF</h1>
+      <div class="muted" id="subtitle">En attente du contexte projet...</div>
+    </div>
+    <div id="banner" class="banner"></div>
+    <form id="bcfForm">
+      <div class="field">
+        <label for="title">Titre *</label>
+        <input id="title" name="title" type="text" required placeholder="Ex. Collision gaine / poutre niveau 2" />
+      </div>
+      <div class="field">
+        <label for="description">Description</label>
+        <textarea id="description" name="description" placeholder="Décrivez le problème, la localisation, l'action attendue..."></textarea>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="topicType">Type</label>
+          <select id="topicType" name="topicType"></select>
+        </div>
+        <div class="field">
+          <label for="priority">Priorité</label>
+          <select id="priority" name="priority"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="assignedTo">Assigné à</label>
+        <select id="assignedTo" name="assignedTo"><option value="">— Personne —</option></select>
+      </div>
+      <div class="actions">
+        <button id="submitBtn" class="primary" type="submit">Créer le BCF</button>
+      </div>
+    </form>
+  </main>
+  <script type="module">
+    let mcpApp = null;
+    let ctx = null;
+    const els = {
+      subtitle: document.getElementById('subtitle'),
+      banner: document.getElementById('banner'),
+      form: document.getElementById('bcfForm'),
+      title: document.getElementById('title'),
+      description: document.getElementById('description'),
+      topicType: document.getElementById('topicType'),
+      priority: document.getElementById('priority'),
+      assignedTo: document.getElementById('assignedTo'),
+      submitBtn: document.getElementById('submitBtn'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+
+    function setBanner(type, message) {
+      els.banner.className = 'banner show ' + type;
+      els.banner.textContent = message;
+    }
+
+    function fillSelect(select, values, selected, placeholder) {
+      const opts = [];
+      if (placeholder !== undefined) opts.push('<option value="">' + escapeHtml(placeholder) + '</option>');
+      for (const v of values) {
+        const isSel = selected && selected === v ? ' selected' : '';
+        opts.push('<option value="' + escapeHtml(v) + '"' + isSel + '>' + escapeHtml(v) + '</option>');
+      }
+      select.innerHTML = opts.join('');
+    }
+
+    function applyContext(data) {
+      if (!data) return;
+      ctx = data;
+      els.subtitle.textContent = 'Projet ' + data.projectId + ' — région ' + data.region;
+      const ext = data.extensions || {};
+      fillSelect(els.topicType, ext.topicTypes || [], data.prefill?.topicType, 'Par défaut');
+      fillSelect(els.priority, ext.priorities || [], data.prefill?.priority, 'Par défaut');
+      els.assignedTo.innerHTML = '<option value="">— Personne —</option>' +
+        (data.users || []).map(u => '<option value="' + escapeHtml(u.email) + '">' + escapeHtml(u.name) + ' (' + escapeHtml(u.email) + ')</option>').join('');
+      if (data.prefill?.assignedTo) els.assignedTo.value = data.prefill.assignedTo;
+      if (data.prefill?.title) els.title.value = data.prefill.title;
+      if (data.prefill?.description) els.description.value = data.prefill.description;
+    }
+
+    async function connectMcpApp() {
+      try {
+        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const { App, PostMessageTransport } = mod;
+        mcpApp = new App({ name: 'Trimble Connect BCF Create', version: '1.0.0' });
+        mcpApp.ontoolresult = ({ structuredContent }) => applyContext(structuredContent);
+        await mcpApp.connect(new PostMessageTransport(window.parent));
+      } catch (error) {
+        setBanner('error', "SDK MCP Apps non chargé. Utilisez la commande texte de création BCF dans le chat.");
+        console.error(error);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      const params = msg?.params || {};
+      const structured = params.structuredContent || params.result?.structuredContent;
+      if (structured) applyContext(structured);
+    });
+
+    els.form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!ctx) { setBanner('error', "Contexte projet indisponible."); return; }
+      const title = els.title.value.trim();
+      if (!title) { setBanner('error', "Le titre est obligatoire."); return; }
+      if (!mcpApp?.callServerTool) { setBanner('error', "Connexion à l'agent indisponible."); return; }
+
+      els.submitBtn.disabled = true;
+      setBanner('success', "Création du BCF en cours...");
+      try {
+        const args = { region: ctx.region, projectId: ctx.projectId, title };
+        const description = els.description.value.trim();
+        if (description) args.description = description;
+        if (els.topicType.value) args.topicType = els.topicType.value;
+        if (els.priority.value) args.priority = els.priority.value;
+        if (els.assignedTo.value) args.assignedTo = els.assignedTo.value;
+
+        const result = await mcpApp.callServerTool({ name: 'tc_bcf_create_topic', arguments: args });
+        const resultText = (result?.content || []).map(c => c.text).filter(Boolean).join('\n');
+        if (result?.isError) {
+          setBanner('error', "Échec de la création: " + (resultText || 'erreur inconnue'));
+        } else {
+          setBanner('success', "BCF « " + title + " » créé avec succès.");
+          els.form.reset();
+          applyContext(ctx);
+          if (mcpApp.sendMessage) {
+            await mcpApp.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Le BCF « ' + title + ' » vient d\'être créé via le formulaire.' }] });
+          }
+        }
+      } catch (error) {
+        setBanner('error', "Erreur: " + (error?.message || String(error)));
+      } finally {
+        els.submitBtn.disabled = false;
+      }
+    });
+
+    connectMcpApp();
+  </script>
+</body>
+</html>`;
+}
+
 function buildDocIndex(): DocSection[] {
   const sections: DocSection[] = [];
 
@@ -254,6 +727,88 @@ function createServer(): McpServer {
     if (!token) throw new Error("No auth token available. Configure the MCP tool in Trimble Agent Studio with an Authorization header: Bearer {actorToken?scopes=openid tc}");
     return token;
   }
+
+  srv.registerResource(
+    "trimble-connect-bcf-dashboard-app",
+    BCF_DASHBOARD_APP_URI,
+    {
+      title: "Trimble Connect BCF Dashboard",
+      description: "Interactive MCP App that visualizes Trimble Connect BCF topics inside Trimble Assist.",
+      mimeType: "text/html+skybridge",
+      _meta: {
+        "ui": {
+          "csp": {
+            "resource_domains": ["https://esm.sh"],
+            "connect_domains": ["https://esm.sh"],
+          },
+          "prefersBorder": true,
+        },
+        "openai/widgetDescription": "Interactive dashboard for filtering and analyzing Trimble Connect BCF topics.",
+        "openai/widgetPrefersBorder": true,
+      },
+    },
+    async () => ({
+      contents: [
+        {
+          uri: BCF_DASHBOARD_APP_URI,
+          mimeType: "text/html+skybridge",
+          text: createBcfDashboardAppHtml(),
+          _meta: {
+            "ui": {
+              "csp": {
+                "resource_domains": ["https://esm.sh"],
+                "connect_domains": ["https://esm.sh"],
+              },
+              "prefersBorder": true,
+            },
+            "openai/widgetDescription": "Interactive dashboard for filtering and analyzing Trimble Connect BCF topics.",
+            "openai/widgetPrefersBorder": true,
+          },
+        },
+      ],
+    })
+  );
+
+  srv.registerResource(
+    "trimble-connect-bcf-create-app",
+    BCF_CREATE_APP_URI,
+    {
+      title: "Créer un BCF Trimble Connect",
+      description: "Interactive MCP App form to create a Trimble Connect BCF topic inside Trimble Assist.",
+      mimeType: "text/html+skybridge",
+      _meta: {
+        "ui": {
+          "csp": {
+            "resource_domains": ["https://esm.sh"],
+            "connect_domains": ["https://esm.sh"],
+          },
+          "prefersBorder": true,
+        },
+        "openai/widgetDescription": "Interactive form to create a Trimble Connect BCF topic.",
+        "openai/widgetPrefersBorder": true,
+      },
+    },
+    async () => ({
+      contents: [
+        {
+          uri: BCF_CREATE_APP_URI,
+          mimeType: "text/html+skybridge",
+          text: createBcfCreateAppHtml(),
+          _meta: {
+            "ui": {
+              "csp": {
+                "resource_domains": ["https://esm.sh"],
+                "connect_domains": ["https://esm.sh"],
+              },
+              "prefersBorder": true,
+            },
+            "openai/widgetDescription": "Interactive form to create a Trimble Connect BCF topic.",
+            "openai/widgetPrefersBorder": true,
+          },
+        },
+      ],
+    })
+  );
 
   srv.tool(
     "tc_api_call",
@@ -542,6 +1097,74 @@ function createServer(): McpServer {
     }
   );
 
+  srv.registerTool(
+    "tc_bcf_dashboard_app",
+    {
+      title: "Afficher le dashboard BCF interactif",
+      description: "Show an interactive MCP App dashboard for Trimble Connect BCF topics. Use this when the user asks for a BCF dashboard, visual BCF summary, filters, charts, or an interactive table of BCF issues.",
+      inputSchema: {
+        region: regionEnum,
+        projectId: z.string().describe("Trimble Connect project ID"),
+        limit: z.number().min(1).max(100).default(30).describe("Maximum number of BCF topics to include in the dashboard"),
+      },
+      _meta: {
+        "ui": {
+          "resourceUri": BCF_DASHBOARD_APP_URI,
+        },
+        "openai/outputTemplate": BCF_DASHBOARD_APP_URI,
+        "openai/widgetAccessible": true,
+        "openai/toolInvocation/invoking": "Chargement du dashboard BCF...",
+        "openai/toolInvocation/invoked": "Dashboard BCF prêt.",
+      },
+    },
+    async ({ region, projectId, limit }, extra) => {
+      const token = getToken(extra);
+      const result = await tcApiCall({
+        method: "GET",
+        region: region as Region,
+        path: `/projects/${projectId}/topics`,
+        apiType: "bcf",
+        authToken: token,
+      });
+
+      if (result.status >= 400) {
+        const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+        return {
+          content: [{ type: "text" as const, text: `Impossible de charger le dashboard BCF: ${result.status} ${result.statusText}\n\n${text}` }],
+          isError: true,
+        };
+      }
+
+      const dashboard = buildBcfDashboardData(projectId, region as string, result.body, limit);
+      const openCount = Object.entries(dashboard.counts.byStatus).reduce((sum, [status, count]) => {
+        const key = status.toLowerCase();
+        return key.includes("new") || key.includes("open") || key.includes("ouvert") ? sum + count : sum;
+      }, 0);
+      const highCount = Object.entries(dashboard.counts.byPriority).reduce((sum, [priority, count]) => {
+        const key = priority.toLowerCase();
+        return key.includes("high") || key.includes("critical") || key.includes("haute") || key.includes("critique") ? sum + count : sum;
+      }, 0);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Dashboard BCF généré pour le projet ${projectId}: ${dashboard.total} BCF au total, ${openCount} ouverts/New, ${highCount} en priorité haute/critique. L'interface interactive permet de filtrer et analyser les ${dashboard.showing} premiers BCF.`,
+          },
+        ],
+        structuredContent: dashboard,
+        _meta: {
+          "ui": {
+            "resourceUri": BCF_DASHBOARD_APP_URI,
+          },
+          "openai/outputTemplate": BCF_DASHBOARD_APP_URI,
+          "openai/widgetAccessible": true,
+          "openai/toolInvocation/invoked": "Dashboard BCF prêt.",
+        },
+      };
+    }
+  );
+
   srv.tool(
     "tc_bcf_create_topic",
     "Create a new BCF topic (issue) in a project.",
@@ -564,6 +1187,96 @@ function createServer(): McpServer {
       const result = await tcApiCall({ method: "POST", region: region as Region, path: `/projects/${projectId}/topics`, apiType: "bcf", body, authToken: token });
       const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
       return { content: [{ type: "text" as const, text: text }] };
+    }
+  );
+
+  srv.registerTool(
+    "tc_bcf_create_app",
+    {
+      title: "Ouvrir le formulaire de création BCF",
+      description: "Show an interactive MCP App form to create a Trimble Connect BCF topic. Use this when the user wants to create/open/fill a BCF, an issue, or a topic via a form. Optional fields prefill the form.",
+      inputSchema: {
+        region: regionEnum,
+        projectId: z.string().describe("Trimble Connect project ID"),
+        title: z.string().optional().describe("Optional prefilled topic title"),
+        description: z.string().optional().describe("Optional prefilled description"),
+        topicType: z.string().optional().describe("Optional prefilled topic type"),
+        priority: z.string().optional().describe("Optional prefilled priority"),
+        assignedTo: z.string().optional().describe("Optional prefilled assignee email"),
+      },
+      _meta: {
+        "ui": {
+          "resourceUri": BCF_CREATE_APP_URI,
+        },
+        "openai/outputTemplate": BCF_CREATE_APP_URI,
+        "openai/widgetAccessible": true,
+        "openai/toolInvocation/invoking": "Ouverture du formulaire BCF...",
+        "openai/toolInvocation/invoked": "Formulaire BCF prêt.",
+      },
+    },
+    async ({ region, projectId, title, description, topicType, priority, assignedTo }, extra) => {
+      const token = getToken(extra);
+
+      const extensions = { topicTypes: [] as string[], priorities: [] as string[], statuses: [] as string[] };
+      let users: { email: string; name: string }[] = [];
+
+      try {
+        const extResult = await tcApiCall({
+          method: "GET",
+          region: region as Region,
+          path: `/projects/${projectId}/extensions`,
+          apiType: "bcf",
+          authToken: token,
+        });
+        if (extResult.status < 400 && extResult.body && typeof extResult.body === "object") {
+          const ext = extResult.body as Record<string, unknown>;
+          extensions.topicTypes = asStringArray(ext.topic_type ?? ext.topicType);
+          extensions.priorities = asStringArray(ext.priority ?? ext.priorities);
+          extensions.statuses = asStringArray(ext.topic_status ?? ext.topicStatus);
+        }
+      } catch { /* extensions are optional */ }
+
+      try {
+        const usersResult = await tcApiCall({
+          method: "GET",
+          region: region as Region,
+          path: `/projects/${projectId}/users`,
+          authToken: token,
+        });
+        if (usersResult.status < 400) users = buildBcfCreateUsers(usersResult.body);
+      } catch { /* users list is optional */ }
+
+      const context: BcfCreateContext = {
+        region: region as string,
+        projectId,
+        prefill: {
+          title: title ?? "",
+          description: description ?? "",
+          topicType: topicType ?? "",
+          priority: priority ?? "",
+          assignedTo: assignedTo ?? "",
+        },
+        extensions,
+        users,
+      };
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Formulaire de création BCF ouvert pour le projet ${projectId} (région ${region}). ${users.length} membre(s) disponible(s) pour assignation. Remplissez le formulaire puis validez pour créer le BCF.`,
+          },
+        ],
+        structuredContent: context,
+        _meta: {
+          "ui": {
+            "resourceUri": BCF_CREATE_APP_URI,
+          },
+          "openai/outputTemplate": BCF_CREATE_APP_URI,
+          "openai/widgetAccessible": true,
+          "openai/toolInvocation/invoked": "Formulaire BCF prêt.",
+        },
+      };
     }
   );
 

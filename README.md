@@ -35,6 +35,22 @@ This MCP server provides structured, searchable documentation for **200+ API end
 | `get_extension_starter` | Get a starter template for a new extension (project/viewer3d/embedded) |
 | `get_viewer_api_guide` | Get detailed guide for a specific Viewer 3D topic |
 | `list_available_docs` | List all available documentation sections |
+| `tc_bcf_dashboard_app` | MCP App: interactive Trimble Connect BCF dashboard rendered inside Trimble Assist |
+| `tc_bcf_create_app` | MCP App: interactive form to create a BCF topic, rendered inside Trimble Assist (submits via `tc_bcf_create_topic`) |
+
+### MCP Apps (interactive UI in Trimble Assist)
+
+`tc_bcf_dashboard_app` and `tc_bcf_create_app` are **MCP Apps**: they return an HTML resource
+(`text/html+skybridge`) that Trimble Assist renders inline in the chat as a nested iframe.
+
+- The HTML connects to the host via `@modelcontextprotocol/ext-apps` (loaded from `https://esm.sh`).
+- Initial context is pushed to the app through the tool's `structuredContent`.
+- The create form calls back the server tool `tc_bcf_create_topic` via `callServerTool` on submit,
+  so all BCF creation logic stays server-side (no duplication).
+- CSP allow-list (`esm.sh`) is declared in the resource `_meta.ui.csp`.
+
+Future enhancement: use the Trimble host-proxy extension (`callLocalTool`) to enrich a BCF with the
+current 3D viewpoint/selection from the embedding host application.
 
 ## Installation
 

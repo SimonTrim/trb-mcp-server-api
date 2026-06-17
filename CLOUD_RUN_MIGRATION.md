@@ -6,7 +6,7 @@ Ce document décrit la migration de `trb-mcp-server-api` vers Google Cloud Run p
 
 - Service Cloud Run public et stable.
 - Endpoint MCP compatible Trimble Agent Studio :
-  - `https://<cloud-run-url>/sse`
+  - `https://<cloud-run-url>/mcp`
 - Endpoint de santé :
   - `https://<cloud-run-url>/health`
 - Déploiement automatique depuis GitHub Actions.
@@ -32,7 +32,7 @@ Ce document décrit la migration de `trb-mcp-server-api` vers Google Cloud Run p
 | Port | `8080` |
 | Auth | `allow unauthenticated` |
 
-> Pourquoi public ? Trimble Agent Studio doit pouvoir appeler l'URL `/sse`. L'authentification Trimble Connect reste portée par le header `Authorization: Bearer {actorToken?scopes=openid tc}` configuré dans Agent Studio.
+> Pourquoi public ? Trimble Agent Studio doit pouvoir appeler l'URL `/mcp`. L'authentification Trimble Connect reste portée par l'option `On behalf of actor token` avec le scope `openid tc` configuré dans Agent Studio.
 
 ## 1. Préparer Google Cloud
 
@@ -219,10 +219,10 @@ curl "https://<cloud-run-url>/health"
 Dans un navigateur, ouvre :
 
 ```text
-https://<cloud-run-url>/sse
+https://<cloud-run-url>/mcp
 ```
 
-Le navigateur peut rester en attente : c'est normal pour SSE.
+Un navigateur peut afficher une erreur `Bad Request` sur `/mcp` car ce endpoint attend des requêtes MCP JSON-RPC. C'est normal. La validation réelle se fait depuis Trimble Agent Studio.
 
 ## 8. Mettre à jour Trimble Agent Studio
 
@@ -231,10 +231,9 @@ Dans le Tool MCP de l'agent :
 | Champ | Valeur |
 | --- | --- |
 | Name | `Trimble Connect API` |
-| URL | `https://<cloud-run-url>/sse` |
-| Authentication | Header personnalisé |
-| Header | `Authorization` |
-| Value | `Bearer {actorToken?scopes=openid tc}` |
+| URL | `https://<cloud-run-url>/mcp` |
+| Authentication | `On behalf of actor token` |
+| Scope | `openid tc` |
 
 Sauvegarde, puis teste une question simple :
 
