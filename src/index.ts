@@ -38,6 +38,7 @@ import { propertySetDocs } from "./data/property-set.js";
 import { pitfallsDocs } from "./data/pitfalls.js";
 import { restApiExtendedDocs } from "./data/rest-api-extended.js";
 import { sdkDocs } from "./data/sdk.js";
+import { registerDomainTools } from "./tc-domain-tools.js";
 
 // Build a flat searchable index of all documentation sections
 interface DocSection {
@@ -644,7 +645,7 @@ const apiCategories = [
 function createServer(): McpServer {
   const srv = new McpServer({
     name: "trimble-connect-api",
-    version: "1.0.0",
+    version: "1.1.0",
   });
 
   srv.tool(
@@ -1332,6 +1333,12 @@ function createServer(): McpServer {
     }
   );
 
+  // ═══════════════════════════════════════════════════
+  // DOMAIN TOOLS — Full Trimble Connect Core + BCF API coverage
+  // (one tool per API domain, endpoint selected via "action")
+  // ═══════════════════════════════════════════════════
+  registerDomainTools(srv, getToken);
+
   return srv;
 }
 
@@ -1459,7 +1466,7 @@ async function main() {
 
     // ── Health check ──
     app.get("/health", (_req, res) => {
-      res.json({ status: "ok", server: "trimble-connect-api", version: "1.0.0" });
+      res.json({ status: "ok", server: "trimble-connect-api", version: "1.1.0" });
     });
 
     const port = parseInt(process.env.PORT || "3001", 10);
