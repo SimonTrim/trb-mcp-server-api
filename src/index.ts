@@ -1358,8 +1358,34 @@ async function main() {
     const transports: Record<string, StreamableHTTPServerTransport> = {};
     const sseTransports: Record<string, { server: McpServer; transport: SSEServerTransport }> = {};
 
+    /**
+     * The MCP SDK strictly requires "Accept: application/json, text/event-stream".
+     * Some clients (e.g. the Trimble Agent Studio connector registry validator)
+     * send a simpler Accept header, which would trigger a 406. Normalize it so
+     * any reasonable client can complete the handshake.
+     */
+    const normalizeAcceptHeader = (req: express.Request) => {
+      const accept = (req.headers["accept"] as string | undefined) ?? "";
+      if (accept.includes("application/json") && accept.includes("text/event-stream")) return;
+
+      const normalized = "application/json, text/event-stream";
+      req.headers["accept"] = normalized;
+      // The MCP SDK converts the request via @hono/node-server, which reads
+      // rawHeaders instead of the parsed headers object — patch both.
+      const raw = req.rawHeaders;
+      let found = false;
+      for (let i = 0; i < raw.length - 1; i += 2) {
+        if (raw[i].toLowerCase() === "accept") {
+          raw[i + 1] = normalized;
+          found = true;
+        }
+      }
+      if (!found) raw.push("Accept", normalized);
+    };
+
     const handleMcpPost = async (req: express.Request, res: express.Response) => {
       try {
+        normalizeAcceptHeader(req);
         const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
         // Capture auth token from every request (Agent Studio injects it)
@@ -1377,6 +1403,9 @@ async function main() {
         if (!sessionId && isInitializeRequest(req.body)) {
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
+            // Plain JSON responses (instead of SSE streams) so that simple
+            // clients and connection validators can parse the handshake.
+            enableJsonResponse: true,
             onsessioninitialized: (sid) => {
               transports[sid] = transport;
               // Store token for the new session too
@@ -1415,6 +1444,7 @@ async function main() {
     };
 
     const handleMcpGet = async (req: express.Request, res: express.Response) => {
+      normalizeAcceptHeader(req);
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       if (sessionId && transports[sessionId]) {
         await transports[sessionId].handleRequest(req, res);
