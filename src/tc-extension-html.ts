@@ -39,7 +39,7 @@ export function createTcExtensionHtml(): string {
 <button id="syncBtn" disabled>Synchroniser maintenant</button>
 <p class="note">Tant que ce panneau est ouvert, la caméra, la sélection et une capture de la vue sont envoyées automatiquement à l'agent IA toutes les quelques secondes.</p>
 <script type="module">
-import * as WorkspaceAPI from "https://esm.sh/trimble-connect-workspace-api@0.3.33";
+import * as WorkspaceAPI from "https://esm.sh/trimble-connect-workspace-api@0.3.34";
 
 const els = {
   conn: document.getElementById("conn"),
@@ -65,11 +65,23 @@ function setText(el, text, cls) {
   el.className = cls || "";
 }
 
+// The token shape varies across Workspace API versions: it can be the raw
+// JWT, be prefixed with "Bearer ", be a status string ("pending"/"denied"/
+// "accepted"), or arrive later via the extension.accessToken event.
+function normalizeToken(value) {
+  if (typeof value !== "string") return null;
+  let s = value.trim();
+  if (s.toLowerCase().startsWith("bearer ")) s = s.slice(7).trim();
+  return s.split(".").length === 3 ? s : null;
+}
+
 function onEvent(event, data) {
   if (event === "extension.accessToken") {
-    if (data && data !== "pending" && data !== "denied") {
-      token = data;
+    const tok = normalizeToken(data);
+    if (tok) {
+      token = tok;
       setText(els.auth, "accordée", "ok");
+      dirty = true;
     } else if (data === "denied") {
       setText(els.auth, "refusée", "warn");
     }
@@ -125,7 +137,11 @@ async function push(force) {
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
       body: JSON.stringify(state),
     });
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).error || ""; } catch {}
+      throw new Error("HTTP " + res.status + (detail ? " - " + detail : ""));
+    }
     dirty = false;
     lastError = null;
     setText(els.sync, new Date().toLocaleTimeString(), "ok");
@@ -153,13 +169,16 @@ async function init() {
 
   try {
     const result = await api.extension.requestPermission("accesstoken");
-    if (result && result !== "pending" && result !== "denied") {
-      token = result;
+    const tok = normalizeToken(result);
+    if (tok) {
+      token = tok;
       setText(els.auth, "accordée", "ok");
-    } else if (result === "pending") {
-      setText(els.auth, "en attente…");
-    } else {
+    } else if (result === "denied") {
       setText(els.auth, "refusée", "warn");
+    } else {
+      // "pending"/"accepted"/other status: the token arrives (or is refreshed)
+      // via the extension.accessToken event handled in onEvent.
+      setText(els.auth, "en attente…");
     }
   } catch {
     setText(els.auth, "erreur", "warn");

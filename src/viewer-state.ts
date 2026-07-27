@@ -94,12 +94,20 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
+/** Strip any (possibly repeated) "Bearer " prefixes off a token string. */
+function normalizeBearer(token: string): string {
+  let s = token.trim();
+  while (s.toLowerCase().startsWith("bearer ")) s = s.slice(7).trim();
+  return s;
+}
+
 /**
  * Resolve the identity keys of a token holder. Primary source is the TC Core
  * API /users/me (validates the token against Trimble at the same time);
  * fallback is the decoded JWT payload (sub / uuid / email claims).
  */
-export async function resolveUserKeys(token: string): Promise<ResolvedUser> {
+export async function resolveUserKeys(rawToken: string): Promise<ResolvedUser> {
+  const token = normalizeBearer(rawToken);
   const cacheKey = token.slice(-48);
   const cached = userCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < USER_CACHE_TTL_MS) return cached.user;
@@ -107,21 +115,24 @@ export async function resolveUserKeys(token: string): Promise<ResolvedUser> {
   const keys = new Set<string>();
   let email: string | undefined;
 
-  try {
-    const res = await fetch("https://app.connect.trimble.com/tc/api/2.0/users/me", {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-    });
-    if (res.ok) {
-      const me = (await res.json()) as Record<string, unknown>;
-      if (typeof me.id === "string") keys.add(me.id);
-      if (typeof me.tiduuid === "string") keys.add(me.tiduuid);
-      if (typeof me.email === "string") {
-        keys.add(me.email);
-        email = me.email;
+  for (const host of ["app.connect.trimble.com", "app21.connect.trimble.com"]) {
+    try {
+      const res = await fetch(`https://${host}/tc/api/2.0/users/me`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      });
+      if (res.ok) {
+        const me = (await res.json()) as Record<string, unknown>;
+        if (typeof me.id === "string") keys.add(me.id);
+        if (typeof me.tiduuid === "string") keys.add(me.tiduuid);
+        if (typeof me.email === "string") {
+          keys.add(me.email);
+          email = me.email;
+        }
+        break;
       }
+    } catch {
+      // Network failure — try next host / fall back to JWT claims below.
     }
-  } catch {
-    // Network failure — fall back to JWT claims below.
   }
 
   const payload = decodeJwtPayload(token);
@@ -134,7 +145,14 @@ export async function resolveUserKeys(token: string): Promise<ResolvedUser> {
   }
 
   const user: ResolvedUser = { keys: [...keys], email };
-  if (user.keys.length > 0) userCache.set(cacheKey, { user, cachedAt: Date.now() });
+  if (user.keys.length > 0) {
+    userCache.set(cacheKey, { user, cachedAt: Date.now() });
+  } else {
+    console.error(
+      `[viewer-state] Could not resolve user identity: token length=${rawToken.length}, ` +
+      `looks like JWT=${token.split(".").length === 3}, prefix=${token.slice(0, 12)}...`
+    );
+  }
   return user;
 }
 
