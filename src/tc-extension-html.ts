@@ -39,7 +39,7 @@ export function createTcExtensionHtml(): string {
 <button id="syncBtn" disabled>Synchroniser maintenant</button>
 <p class="note">Tant que ce panneau est ouvert, la caméra, la sélection et une capture de la vue sont envoyées automatiquement à l'agent IA toutes les quelques secondes.</p>
 <script type="module">
-import * as WorkspaceAPI from "https://esm.sh/trimble-connect-workspace-api@1.2.7";
+import * as WorkspaceAPI from "https://esm.sh/trimble-connect-workspace-api@0.3.33";
 
 const els = {
   conn: document.getElementById("conn"),
