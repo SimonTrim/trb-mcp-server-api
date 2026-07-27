@@ -64,13 +64,41 @@ export function storeViewerState(userKeys: string[], state: ViewerState, userEma
   }
 }
 
-export function getViewerState(userKeys: string[]): StoredState | undefined {
+export interface ViewerStateMatch {
+  entry: StoredState;
+  /** "exact" = caller identity matched a stored key; "single_user_fallback" =
+   * no key matched but only one user has pushed state, so we use it. */
+  matchedBy: "exact" | "single_user_fallback";
+}
+
+export function getViewerState(userKeys: string[]): ViewerStateMatch | undefined {
   prune();
   for (const key of userKeys) {
     const entry = stateByUserKey.get(key.toLowerCase());
-    if (entry) return entry;
+    if (entry) return { entry, matchedBy: "exact" };
+  }
+  // The Agent Studio gateway token may resolve to a different identity than
+  // the extension token. If a single user is pushing state, it is safe enough
+  // to fall back to it.
+  const uniqueEntries = new Set(stateByUserKey.values());
+  if (uniqueEntries.size === 1) {
+    return { entry: [...uniqueEntries][0], matchedBy: "single_user_fallback" };
   }
   return undefined;
+}
+
+/** Diagnostic summary of the store: which keys hold state and how old it is. */
+export function describeStore(): Record<string, unknown> {
+  prune();
+  const uniqueEntries = new Set(stateByUserKey.values());
+  return {
+    stored_states: uniqueEntries.size,
+    keys: [...stateByUserKey.entries()].map(([key, entry]) => ({
+      key,
+      email: entry.userEmail ?? null,
+      age_seconds: Math.round((Date.now() - entry.storedAt) / 1000),
+    })),
+  };
 }
 
 // ── User identity resolution ──

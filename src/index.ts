@@ -45,6 +45,7 @@ import {
   resolveUserKeys,
   buildBcfViewpoint,
   describeState,
+  describeStore,
   type ViewerState,
 } from "./viewer-state.js";
 import { createTcExtensionHtml } from "./tc-extension-html.js";
@@ -1359,8 +1360,8 @@ function createServer(): McpServer {
     async (_args, extra) => {
       const token = getToken(extra);
       const user = await resolveUserKeys(token);
-      const entry = getViewerState(user.keys);
-      if (!entry) {
+      const match = getViewerState(user.keys);
+      if (!match) {
         console.error(`[viewer-state] get_current_viewer_state: no state for keys=[${user.keys.join(", ")}]`);
         return {
           content: [{
@@ -1370,7 +1371,8 @@ function createServer(): McpServer {
           isError: true,
         };
       }
-      return { content: [{ type: "text" as const, text: JSON.stringify(describeState(entry), null, 2) }] };
+      const described = { matched_by: match.matchedBy, ...describeState(match.entry) };
+      return { content: [{ type: "text" as const, text: JSON.stringify(described, null, 2) }] };
     }
   );
 
@@ -1388,8 +1390,8 @@ function createServer(): McpServer {
     async ({ region, projectId, topicId, bcfVersion, includeSnapshot, includeSelection }, extra) => {
       const token = getToken(extra);
       const user = await resolveUserKeys(token);
-      const entry = getViewerState(user.keys);
-      if (!entry) {
+      const match = getViewerState(user.keys);
+      if (!match) {
         console.error(`[viewer-state] tc_create_viewpoint_from_viewer: no state for keys=[${user.keys.join(", ")}]`);
         return {
           content: [{
@@ -1399,6 +1401,7 @@ function createServer(): McpServer {
           isError: true,
         };
       }
+      const entry = match.entry;
 
       const state: ViewerState = { ...entry.state };
       if (!includeSnapshot) delete state.snapshot;
@@ -1435,6 +1438,35 @@ function createServer(): McpServer {
           text: `Viewpoint created on topic ${topicId} (viewer state age: ${ageSeconds}s, snapshot: ${state.snapshot ? "yes" : "no"}, components: ${includeSelection ? (state.selection ?? []).reduce((n, s) => n + (s.externalIds?.length ?? 0), 0) : 0}).${staleWarning}\n\n${text}`,
         }],
       };
+    }
+  );
+
+  srv.tool(
+    "viewer_bridge_debug",
+    "Diagnostic tool for the Agent Eyes viewer bridge. Returns the identity resolved from the calling token, the identities currently holding viewer state on the server, and whether they match. Use only when get_current_viewer_state or tc_create_viewpoint_from_viewer report that no viewer state is available.",
+    {},
+    async (_args, extra) => {
+      const token = getToken(extra);
+      const user = await resolveUserKeys(token);
+      const payload = (() => {
+        try {
+          const part = token.replace(/^Bearer\s+/i, "").split(".")[1];
+          const claims = JSON.parse(Buffer.from(part.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+          return { sub: claims.sub, email: claims.email, azp: claims.azp, scope: claims.scope, identity_type: claims.identity_type };
+        } catch {
+          return { error: "token is not a decodable JWT" };
+        }
+      })();
+      const match = getViewerState(user.keys);
+      const report = {
+        caller_resolved_keys: user.keys,
+        caller_email: user.email ?? null,
+        caller_token_claims: payload,
+        store: describeStore(),
+        match: match ? match.matchedBy : "none",
+      };
+      console.log(`[viewer-state] debug: ${JSON.stringify(report)}`);
+      return { content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }] };
     }
   );
 
