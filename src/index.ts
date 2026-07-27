@@ -39,6 +39,16 @@ import { pitfallsDocs } from "./data/pitfalls.js";
 import { restApiExtendedDocs } from "./data/rest-api-extended.js";
 import { sdkDocs } from "./data/sdk.js";
 import { registerDomainTools } from "./tc-domain-tools.js";
+import {
+  storeViewerState,
+  getViewerState,
+  resolveUserKeys,
+  buildBcfViewpoint,
+  describeState,
+  type ViewerState,
+} from "./viewer-state.js";
+import { createTcExtensionHtml } from "./tc-extension-html.js";
+import { TC_EXTENSION_ICON_BASE64 } from "./tc-extension-icon.js";
 
 // Build a flat searchable index of all documentation sections
 interface DocSection {
@@ -645,7 +655,7 @@ const apiCategories = [
 function createServer(): McpServer {
   const srv = new McpServer({
     name: "trimble-connect-api",
-    version: "1.1.0",
+    version: "1.2.0",
   });
 
   srv.tool(
@@ -1337,6 +1347,94 @@ function createServer(): McpServer {
   // DOMAIN TOOLS — Full Trimble Connect Core + BCF API coverage
   // (one tool per API domain, endpoint selected via "action")
   // ═══════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════
+  // VIEWER BRIDGE TOOLS — Live 3D viewer state pushed by
+  // the "Agent Eyes" Trimble Connect extension
+  // ═══════════════════════════════════════════════════
+
+  srv.tool(
+    "get_current_viewer_state",
+    "Get the LIVE state of the user's Trimble Connect 3D viewer: current camera (position/target/up), selected objects with their IFC GUIDs, loaded models and snapshot availability. Requires the 'Agent Eyes' extension panel to be open in Trimble Connect — if no state is available, ask the user to open it. Check age_seconds/stale to warn the user when the data is old. Use this whenever a request refers to what the user currently sees ('these objects', 'my current view'...).",
+    {},
+    async (_args, extra) => {
+      const token = getToken(extra);
+      const user = await resolveUserKeys(token);
+      const entry = getViewerState(user.keys);
+      if (!entry) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No viewer state available for this user. Ask the user to open the 'Agent Eyes' extension panel in Trimble Connect (left sidebar) and keep it open, then retry.",
+          }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(describeState(entry), null, 2) }] };
+    }
+  );
+
+  srv.tool(
+    "tc_create_viewpoint_from_viewer",
+    "Create a BCF viewpoint on an existing topic directly from the user's LIVE 3D viewer state: perspective camera, selected components (IFC GUIDs) and PNG snapshot. The snapshot is attached server-side and never passes through the model. Requires the 'Agent Eyes' extension panel to be open in Trimble Connect. Typical flow: 1) tc_bcf action topic_create, 2) this tool with the returned topic GUID.",
+    {
+      region: regionEnum,
+      projectId: z.string().describe("Trimble Connect project ID"),
+      topicId: z.string().describe("GUID of the BCF topic to attach the viewpoint to"),
+      bcfVersion: z.enum(["2.1", "3.0"]).default("2.1").describe("BCF API version"),
+      includeSnapshot: z.boolean().default(true).describe("Attach the viewer snapshot image to the viewpoint"),
+      includeSelection: z.boolean().default(true).describe("Attach the selected components (IFC GUIDs) to the viewpoint"),
+    },
+    async ({ region, projectId, topicId, bcfVersion, includeSnapshot, includeSelection }, extra) => {
+      const token = getToken(extra);
+      const user = await resolveUserKeys(token);
+      const entry = getViewerState(user.keys);
+      if (!entry) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No viewer state available for this user. Ask the user to open the 'Agent Eyes' extension panel in Trimble Connect (left sidebar) and keep it open, then retry.",
+          }],
+          isError: true,
+        };
+      }
+
+      const state: ViewerState = { ...entry.state };
+      if (!includeSnapshot) delete state.snapshot;
+      if (!includeSelection) delete state.selection;
+
+      const viewpoint = buildBcfViewpoint(state, bcfVersion);
+      if (!viewpoint.perspective_camera) {
+        return {
+          content: [{ type: "text" as const, text: "The cached viewer state has no camera data. Ask the user to move the camera in the 3D viewer (with the Agent Eyes panel open) and retry." }],
+          isError: true,
+        };
+      }
+
+      const result = await tcApiCall({
+        method: "POST",
+        region: region as Region,
+        path: `/projects/${projectId}/topics/${topicId}/viewpoints`,
+        apiType: "bcf",
+        bcfVersion,
+        body: viewpoint,
+        authToken: token,
+      });
+
+      const ageSeconds = Math.round((Date.now() - entry.storedAt) / 1000);
+      const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
+      if (result.status >= 400) {
+        return { content: [{ type: "text" as const, text: `ERROR: POST viewpoint → ${result.status} ${result.statusText}\n\n${text}` }], isError: true };
+      }
+      const staleWarning = ageSeconds > 120 ? `\n\nWARNING: the viewer state was ${ageSeconds}s old — verify the viewpoint matches what the user expects.` : "";
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Viewpoint created on topic ${topicId} (viewer state age: ${ageSeconds}s, snapshot: ${state.snapshot ? "yes" : "no"}, components: ${includeSelection ? (state.selection ?? []).reduce((n, s) => n + (s.externalIds?.length ?? 0), 0) : 0}).${staleWarning}\n\n${text}`,
+        }],
+      };
+    }
+  );
+
   registerDomainTools(srv, getToken);
 
   return srv;
@@ -1352,7 +1450,8 @@ async function main() {
   if (isHttpMode) {
     const app = express();
     app.use(cors());
-    app.use(express.json());
+    // 10 MB limit: the Agent Eyes extension pushes viewer snapshots (base64 PNG)
+    app.use(express.json({ limit: "10mb" }));
 
     // ── Transport state ──
     const transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -1494,9 +1593,53 @@ async function main() {
       await entry.transport.handlePostMessage(req, res);
     });
 
+    // ── Viewer-state bridge (Agent Eyes extension) ──
+
+    app.post("/viewer-state", async (req, res) => {
+      try {
+        const authHeader = req.headers["authorization"] as string | undefined;
+        if (!authHeader) {
+          res.status(401).json({ error: "Missing Authorization header" });
+          return;
+        }
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+        const user = await resolveUserKeys(token);
+        if (user.keys.length === 0) {
+          res.status(401).json({ error: "Could not resolve user identity from token" });
+          return;
+        }
+        storeViewerState(user.keys, (req.body ?? {}) as ViewerState, user.email);
+        res.json({ ok: true, storedAt: new Date().toISOString() });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // Extension manifest + page, served from this same host so a single
+    // deployment carries both the MCP server and the extension UI.
+    app.get("/tc-extension/manifest.json", (req, res) => {
+      const host = (req.headers["x-forwarded-host"] as string | undefined) ?? req.headers.host;
+      const proto = (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
+      res.json({
+        title: "Agent Eyes",
+        url: `${proto}://${host}/tc-extension/index.html`,
+        icon: `${proto}://${host}/tc-extension/icon.png`,
+        description: "Partage la caméra, la sélection et une capture du viewer 3D avec l'agent IA Trimble Connect",
+        enabled: true,
+      });
+    });
+
+    app.get(["/tc-extension", "/tc-extension/", "/tc-extension/index.html"], (_req, res) => {
+      res.type("html").send(createTcExtensionHtml());
+    });
+
+    app.get("/tc-extension/icon.png", (_req, res) => {
+      res.type("png").send(Buffer.from(TC_EXTENSION_ICON_BASE64, "base64"));
+    });
+
     // ── Health check ──
     app.get("/health", (_req, res) => {
-      res.json({ status: "ok", server: "trimble-connect-api", version: "1.1.0" });
+      res.json({ status: "ok", server: "trimble-connect-api", version: "1.2.0" });
     });
 
     const port = parseInt(process.env.PORT || "3001", 10);
