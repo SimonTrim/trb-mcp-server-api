@@ -1361,6 +1361,7 @@ function createServer(): McpServer {
       const user = await resolveUserKeys(token);
       const entry = getViewerState(user.keys);
       if (!entry) {
+        console.error(`[viewer-state] get_current_viewer_state: no state for keys=[${user.keys.join(", ")}]`);
         return {
           content: [{
             type: "text" as const,
@@ -1389,6 +1390,7 @@ function createServer(): McpServer {
       const user = await resolveUserKeys(token);
       const entry = getViewerState(user.keys);
       if (!entry) {
+        console.error(`[viewer-state] tc_create_viewpoint_from_viewer: no state for keys=[${user.keys.join(", ")}]`);
         return {
           content: [{
             type: "text" as const,
@@ -1423,6 +1425,7 @@ function createServer(): McpServer {
       const ageSeconds = Math.round((Date.now() - entry.storedAt) / 1000);
       const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2);
       if (result.status >= 400) {
+        console.error(`[viewer-state] POST viewpoint failed: ${result.status} ${result.statusText} — ${text.slice(0, 500)}`);
         return { content: [{ type: "text" as const, text: `ERROR: POST viewpoint → ${result.status} ${result.statusText}\n\n${text}` }], isError: true };
       }
       const staleWarning = ageSeconds > 120 ? `\n\nWARNING: the viewer state was ${ageSeconds}s old — verify the viewpoint matches what the user expects.` : "";
@@ -1609,6 +1612,7 @@ async function main() {
           return;
         }
         storeViewerState(user.keys, (req.body ?? {}) as ViewerState, user.email);
+        console.log(`[viewer-state] stored for keys=[${user.keys.join(", ")}]`);
         res.json({ ok: true, storedAt: new Date().toISOString() });
       } catch (error) {
         res.status(500).json({ error: String(error) });

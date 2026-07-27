@@ -48,6 +48,8 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
+          # max-instances must stay at 1: MCP sessions and the Agent Eyes
+          # viewer-state cache are stored in memory, per instance.
           gcloud run deploy "${{ env.SERVICE_NAME }}" \
             --image "$IMAGE" \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
@@ -55,9 +57,9 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --min-instances 1 \
-            --max-instances 5 \
+            --max-instances 1 \
             --timeout 3600 \
-            --concurrency 10 \
+            --concurrency 80 \
             --memory 512Mi \
             --cpu 1 \
             --port 8080 \
