@@ -1431,11 +1431,43 @@ function createServer(): McpServer {
         console.error(`[viewer-state] POST viewpoint failed: ${result.status} ${result.statusText} — ${text.slice(0, 500)}`);
         return { content: [{ type: "text" as const, text: `ERROR: POST viewpoint → ${result.status} ${result.statusText}\n\n${text}` }], isError: true };
       }
+
+      // Link the models loaded in the viewer to the topic (what the TC UI
+      // calls "Link model"), so the topic is not flagged as missing its model.
+      let modelLink = "no model info from viewer";
+      const models = (state.models ?? []).filter((m) => m.name);
+      if (models.length > 0) {
+        try {
+          const filesResult = await tcApiCall({
+            method: "PUT",
+            region: region as Region,
+            path: `/projects/${projectId}/topics/${topicId}/files`,
+            apiType: "bcf",
+            bcfVersion,
+            body: models.map((m) => ({
+              file_name: m.name,
+              reference: m.versionId ?? m.id,
+            })),
+            authToken: token,
+          });
+          modelLink = filesResult.status < 400
+            ? `linked ${models.length} model(s): ${models.map((m) => m.name).join(", ")}`
+            : `failed (${filesResult.status} ${filesResult.statusText})`;
+          if (filesResult.status >= 400) {
+            const detail = typeof filesResult.body === "string" ? filesResult.body : JSON.stringify(filesResult.body);
+            console.error(`[viewer-state] PUT topic files failed: ${filesResult.status} — ${detail.slice(0, 500)}`);
+          }
+        } catch (error) {
+          modelLink = `failed (${String(error)})`;
+          console.error(`[viewer-state] PUT topic files threw: ${String(error)}`);
+        }
+      }
+
       const staleWarning = ageSeconds > 120 ? `\n\nWARNING: the viewer state was ${ageSeconds}s old — verify the viewpoint matches what the user expects.` : "";
       return {
         content: [{
           type: "text" as const,
-          text: `Viewpoint created on topic ${topicId} (viewer state age: ${ageSeconds}s, snapshot: ${state.snapshot ? "yes" : "no"}, components: ${includeSelection ? (state.selection ?? []).reduce((n, s) => n + (s.externalIds?.length ?? 0), 0) : 0}).${staleWarning}\n\n${text}`,
+          text: `Viewpoint created on topic ${topicId} (viewer state age: ${ageSeconds}s, snapshot: ${state.snapshot ? "yes" : "no"}, components: ${includeSelection ? (state.selection ?? []).reduce((n, s) => n + (s.externalIds?.length ?? 0), 0) : 0}, model link: ${modelLink}).${staleWarning}\n\n${text}`,
         }],
       };
     }

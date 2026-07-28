@@ -98,7 +98,7 @@ async function capture() {
 
   try {
     const models = await api.viewer.getModels("loaded");
-    state.models = (models || []).map((m) => ({ id: m.id, name: m.name }));
+    state.models = (models || []).map((m) => ({ id: m.id, versionId: m.versionId, name: m.name }));
   } catch {}
 
   try {

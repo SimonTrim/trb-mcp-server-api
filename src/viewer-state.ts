@@ -49,7 +49,7 @@ export interface ViewerState {
   /** data URL or raw base64 PNG of the current viewer canvas */
   snapshot?: string;
   project?: { id?: string; name?: string; location?: string };
-  models?: { id: string; name?: string }[];
+  models?: { id: string; versionId?: string; name?: string }[];
   /** Client-side capture timestamp (ms since epoch) */
   capturedAt?: number;
 }
