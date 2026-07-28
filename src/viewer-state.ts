@@ -13,11 +13,25 @@
  * Storage is in-memory, consistent with the per-instance MCP session store.
  */
 
+/**
+ * Camera as pushed by the extension. The Workspace API Camera shape is
+ * { position, lookAt, upDirection, pitch, yaw, fieldOfView, projectionType }
+ * (lookAt/upDirection are deprecated and may be absent); aliases target/up/fov
+ * are also accepted for robustness.
+ */
 export interface ViewerCamera {
-  position: { x: number; y: number; z: number };
-  target: { x: number; y: number; z: number };
-  up: { x: number; y: number; z: number };
+  position?: { x: number; y: number; z: number };
+  target?: { x: number; y: number; z: number };
+  lookAt?: { x: number; y: number; z: number };
+  up?: { x: number; y: number; z: number };
+  upDirection?: { x: number; y: number; z: number };
+  /** Rotation pitch angle in radians */
+  pitch?: number;
+  /** Rotation yaw angle in radians */
+  yaw?: number;
   fov?: number;
+  /** Field of view in degrees (Workspace API name) */
+  fieldOfView?: number;
   projectionType?: string;
 }
 
@@ -204,16 +218,32 @@ export function toRawBase64(snapshot: string): string {
 export function buildBcfViewpoint(state: ViewerState, bcfVersion: string): Record<string, unknown> {
   const viewpoint: Record<string, unknown> = {};
 
-  if (state.camera) {
-    const { position, target, up, fov } = state.camera;
-    const direction = normalize({ x: target.x - position.x, y: target.y - position.y, z: target.z - position.z });
-    viewpoint.perspective_camera = {
-      camera_view_point: { x: position.x, y: position.y, z: position.z },
-      camera_direction: direction,
-      camera_up_vector: normalize(up),
-      field_of_view: fov ?? 60,
-      ...(bcfVersion === "3.0" ? { aspect_ratio: 1.33 } : {}),
-    };
+  const cam = state.camera;
+  const position = cam?.position;
+  if (cam && position && typeof position.x === "number") {
+    const lookAt = cam.target ?? cam.lookAt;
+    let direction: { x: number; y: number; z: number } | undefined;
+    if (lookAt && typeof lookAt.x === "number") {
+      direction = normalize({ x: lookAt.x - position.x, y: lookAt.y - position.y, z: lookAt.z - position.z });
+    } else if (typeof cam.pitch === "number" && typeof cam.yaw === "number") {
+      // Z-up convention: yaw around the vertical axis, pitch from horizontal.
+      const cosPitch = Math.cos(cam.pitch);
+      direction = normalize({
+        x: cosPitch * Math.cos(cam.yaw),
+        y: cosPitch * Math.sin(cam.yaw),
+        z: Math.sin(cam.pitch),
+      });
+    }
+    if (direction) {
+      const up = cam.up ?? cam.upDirection ?? { x: 0, y: 0, z: 1 };
+      viewpoint.perspective_camera = {
+        camera_view_point: { x: position.x, y: position.y, z: position.z },
+        camera_direction: direction,
+        camera_up_vector: normalize(up),
+        field_of_view: cam.fov ?? cam.fieldOfView ?? 60,
+        ...(bcfVersion === "3.0" ? { aspect_ratio: 1.33 } : {}),
+      };
+    }
   }
 
   const ifcGuids = (state.selection ?? []).flatMap((sel) => sel.externalIds ?? []);
