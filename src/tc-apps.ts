@@ -13,10 +13,14 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { tcApiCall, type Region } from "./tc-api-client.js";
+import { tcApiCall, getBcfBaseUrl, type Region } from "./tc-api-client.js";
+import { resolveUserKeys, getViewerState } from "./viewer-state.js";
 
 const TODOS_APP_URI = "ui://trimble-connect/todos.html";
 const FILES_APP_URI = "ui://trimble-connect/files.html";
+const BCF_DETAIL_APP_URI = "ui://trimble-connect/bcf-detail.html";
+const SELECTION_REVIEW_APP_URI = "ui://trimble-connect/selection-review.html";
+const ACTIVITY_TIMELINE_APP_URI = "ui://trimble-connect/activity-timeline.html";
 
 const APP_CSP_META = {
   "ui": {
@@ -458,6 +462,644 @@ function createFilesAppHtml(): string {
 </html>`;
 }
 
+// ── BCF detail app ──
+
+function asStringArrayLoose(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function buildBcfDetailData(
+  region: string,
+  projectId: string,
+  bcfVersion: string,
+  rawTopic: Record<string, unknown>,
+  rawComments: unknown,
+  rawViewpoints: unknown,
+  rawExtensions: unknown
+) {
+  const comments = asRecordArray(rawComments).map((c) => ({
+    guid: toText(c.guid ?? c.id),
+    author: toText(c.author ?? c.modified_author ?? c.created_by),
+    date: toText(c.date ?? c.created_on ?? c.modified_date, "").substring(0, 16).replace("T", " "),
+    text: toText(c.comment, ""),
+  }));
+  const viewpoints = asRecordArray(rawViewpoints).map((v) => ({
+    guid: toText(v.guid ?? v.id),
+    hasSnapshot: Boolean(v.snapshot ?? v.snapshot_type ?? true),
+  }));
+  const ext = (typeof rawExtensions === "object" && rawExtensions !== null ? rawExtensions : {}) as Record<string, unknown>;
+  return {
+    mode: "detail" as const,
+    region,
+    projectId,
+    bcfVersion,
+    topic: {
+      guid: toText(rawTopic.guid ?? rawTopic.id),
+      title: toText(rawTopic.title, "(sans titre)"),
+      description: toText(rawTopic.description, ""),
+      status: toText(rawTopic.topic_status ?? rawTopic.status),
+      priority: toText(rawTopic.priority),
+      type: toText(rawTopic.topic_type ?? rawTopic.type),
+      assignedTo: toText(rawTopic.assigned_to, ""),
+      createdBy: toText(rawTopic.creation_author ?? rawTopic.created_by),
+      created: toDateText(rawTopic.creation_date ?? rawTopic.created),
+      modified: toDateText(rawTopic.modified_date ?? rawTopic.modified),
+      dueDate: toDateText(rawTopic.due_date),
+    },
+    extensions: {
+      statuses: asStringArrayLoose(ext.topic_status ?? ext.topicStatus),
+      priorities: asStringArrayLoose(ext.priority ?? ext.priorities),
+    },
+    comments,
+    viewpoints,
+  };
+}
+
+function createBcfDetailAppHtml(): string {
+  return String.raw`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Détail BCF Trimble Connect</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Open Sans", Arial, sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #1e293b; }
+    .app { padding: 14px; }
+    h1 { font-size: 16px; line-height: 1.3; margin: 0 0 4px; }
+    .muted { color: #64748b; font-size: 12px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 12px; margin-right: 6px; white-space: nowrap; }
+    .section { margin-top: 14px; }
+    .section h2 { font-size: 13px; margin: 0 0 8px; color: #334155; }
+    .card { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; }
+    .desc { white-space: pre-wrap; font-size: 13px; }
+    select, textarea, button, input { border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 12px; padding: 7px 9px; }
+    textarea { width: 100%; box-sizing: border-box; min-height: 54px; resize: vertical; font-family: inherit; }
+    button { cursor: pointer; font-weight: 600; }
+    button.primary { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .comment { border-bottom: 1px solid #e2e8f0; padding: 8px 0; }
+    .comment:last-child { border-bottom: 0; }
+    .comment .meta { font-size: 11px; color: #64748b; margin-bottom: 2px; }
+    .comment .body { font-size: 13px; white-space: pre-wrap; }
+    .vp { display: inline-block; margin: 0 8px 8px 0; text-align: center; }
+    .vp img { max-width: 280px; max-height: 200px; border: 1px solid #e2e8f0; border-radius: 8px; display: block; margin-top: 6px; }
+    .banner { padding: 9px 11px; border-radius: 8px; font-size: 12px; display: none; margin-top: 10px; }
+    .banner.show { display: block; }
+    .banner.success { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
+    .banner.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .empty { color: #64748b; font-size: 12px; font-style: italic; }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1 id="title">Chargement du BCF...</h1>
+    <div class="muted" id="subtitle"></div>
+    <div style="margin-top:8px" id="pills"></div>
+    <div id="banner" class="banner"></div>
+
+    <div class="section">
+      <h2>Description</h2>
+      <div class="card desc" id="description">-</div>
+    </div>
+
+    <div class="section">
+      <h2>Modifier</h2>
+      <div class="card">
+        <div class="row">
+          <label class="muted">Statut</label><select id="statusSel"></select>
+          <label class="muted">Priorité</label><select id="prioritySel"></select>
+          <button id="applyBtn" class="primary" type="button">Appliquer</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Vues (viewpoints)</h2>
+      <div class="card" id="viewpoints"><span class="empty">Aucune vue attachée.</span></div>
+    </div>
+
+    <div class="section">
+      <h2>Commentaires</h2>
+      <div class="card" id="comments"><span class="empty">Aucun commentaire.</span></div>
+      <div style="margin-top:8px">
+        <textarea id="newComment" placeholder="Ajouter un commentaire..."></textarea>
+        <div class="row" style="justify-content:flex-end; margin-top:6px">
+          <button id="commentBtn" class="primary" type="button">Commenter</button>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script type="module">
+    let mcpApp = null;
+    let data = null;
+    const els = {
+      title: document.getElementById('title'),
+      subtitle: document.getElementById('subtitle'),
+      pills: document.getElementById('pills'),
+      banner: document.getElementById('banner'),
+      description: document.getElementById('description'),
+      statusSel: document.getElementById('statusSel'),
+      prioritySel: document.getElementById('prioritySel'),
+      applyBtn: document.getElementById('applyBtn'),
+      viewpoints: document.getElementById('viewpoints'),
+      comments: document.getElementById('comments'),
+      newComment: document.getElementById('newComment'),
+      commentBtn: document.getElementById('commentBtn'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+
+    function setBanner(type, message) {
+      els.banner.className = 'banner show ' + type;
+      els.banner.textContent = message;
+    }
+
+    function fillSelect(select, values, selected) {
+      const list = values && values.length ? values : (selected ? [selected] : []);
+      select.innerHTML = list.map(v => '<option value="' + escapeHtml(v) + '"' + (v === selected ? ' selected' : '') + '>' + escapeHtml(v) + '</option>').join('');
+    }
+
+    function render(newData) {
+      if (!newData) return;
+      if (newData.mode === 'snapshot') { renderSnapshot(newData); return; }
+      data = newData;
+      const t = data.topic;
+      els.title.textContent = t.title;
+      els.subtitle.textContent = 'Créé par ' + t.createdBy + ' le ' + t.created + ' — modifié le ' + t.modified + (t.assignedTo ? ' — assigné à ' + t.assignedTo : '');
+      els.pills.innerHTML =
+        '<span class="pill">' + escapeHtml(t.status) + '</span>' +
+        '<span class="pill">Priorité: ' + escapeHtml(t.priority) + '</span>' +
+        '<span class="pill">' + escapeHtml(t.type) + '</span>' +
+        (t.dueDate !== '-' ? '<span class="pill">Échéance: ' + escapeHtml(t.dueDate) + '</span>' : '');
+      els.description.textContent = t.description || '(pas de description)';
+      fillSelect(els.statusSel, data.extensions.statuses, t.status);
+      fillSelect(els.prioritySel, data.extensions.priorities, t.priority);
+
+      if (data.comments.length === 0) {
+        els.comments.innerHTML = '<span class="empty">Aucun commentaire.</span>';
+      } else {
+        els.comments.innerHTML = data.comments.map(c =>
+          '<div class="comment"><div class="meta">' + escapeHtml(c.author) + ' — ' + escapeHtml(c.date) + '</div><div class="body">' + escapeHtml(c.text) + '</div></div>'
+        ).join('');
+      }
+
+      if (data.viewpoints.length === 0) {
+        els.viewpoints.innerHTML = '<span class="empty">Aucune vue attachée.</span>';
+      } else {
+        els.viewpoints.innerHTML = data.viewpoints.map((v, i) =>
+          '<div class="vp" id="vp-' + escapeHtml(v.guid) + '"><button type="button" data-vp="' + escapeHtml(v.guid) + '">Afficher la capture ' + (i + 1) + '</button></div>'
+        ).join('');
+        for (const btn of els.viewpoints.querySelectorAll('button[data-vp]')) {
+          btn.addEventListener('click', () => loadSnapshot(btn.getAttribute('data-vp')));
+        }
+      }
+    }
+
+    function renderSnapshot(snap) {
+      const holder = document.getElementById('vp-' + snap.viewpointId);
+      if (holder && snap.dataUrl) holder.innerHTML = '<img alt="Capture du viewpoint" src="' + snap.dataUrl + '" />';
+    }
+
+    async function loadSnapshot(vpId) {
+      if (!mcpApp?.callServerTool || !data) return;
+      const holder = document.getElementById('vp-' + vpId);
+      if (holder) holder.innerHTML = '<span class="empty">Chargement de la capture...</span>';
+      try {
+        const result = await mcpApp.callServerTool({
+          name: 'tc_bcf_detail_app',
+          arguments: { region: data.region, projectId: data.projectId, topicId: data.topic.guid, bcfVersion: data.bcfVersion, snapshotViewpointId: vpId },
+        });
+        if (!result.isError && result.structuredContent) renderSnapshot(result.structuredContent);
+        else if (holder) holder.innerHTML = '<span class="empty">Capture indisponible.</span>';
+      } catch (e) {
+        if (holder) holder.innerHTML = '<span class="empty">Capture indisponible.</span>';
+      }
+    }
+
+    async function reload() {
+      if (!mcpApp?.callServerTool || !data) return;
+      const result = await mcpApp.callServerTool({
+        name: 'tc_bcf_detail_app',
+        arguments: { region: data.region, projectId: data.projectId, topicId: data.topic.guid, bcfVersion: data.bcfVersion },
+      });
+      if (!result.isError && result.structuredContent) render(result.structuredContent);
+    }
+
+    els.applyBtn.addEventListener('click', async () => {
+      if (!mcpApp?.callServerTool || !data) return;
+      els.applyBtn.disabled = true;
+      setBanner('success', 'Mise à jour du BCF...');
+      try {
+        const t = data.topic;
+        const body = { title: t.title, topic_status: els.statusSel.value, priority: els.prioritySel.value };
+        if (t.description) body.description = t.description;
+        if (t.type && t.type !== '-') body.topic_type = t.type;
+        if (t.assignedTo) body.assigned_to = t.assignedTo;
+        const result = await mcpApp.callServerTool({
+          name: 'tc_bcf',
+          arguments: { region: data.region, action: 'topic_update', projectId: data.projectId, id: t.guid, bcfVersion: data.bcfVersion, body },
+        });
+        if (result?.isError) {
+          const txt = (result?.content || []).map(c => c.text).filter(Boolean).join(' ');
+          setBanner('error', 'Échec de la mise à jour: ' + (txt || 'erreur inconnue').substring(0, 300));
+        } else {
+          setBanner('success', 'BCF mis à jour.');
+          await reload();
+        }
+      } catch (e) {
+        setBanner('error', 'Erreur: ' + (e?.message || String(e)));
+      } finally {
+        els.applyBtn.disabled = false;
+      }
+    });
+
+    els.commentBtn.addEventListener('click', async () => {
+      const text = els.newComment.value.trim();
+      if (!text || !mcpApp?.callServerTool || !data) return;
+      els.commentBtn.disabled = true;
+      try {
+        const result = await mcpApp.callServerTool({
+          name: 'tc_bcf',
+          arguments: { region: data.region, action: 'comment_create', projectId: data.projectId, id: data.topic.guid, bcfVersion: data.bcfVersion, body: { comment: text } },
+        });
+        if (result?.isError) {
+          setBanner('error', 'Échec de l\'ajout du commentaire.');
+        } else {
+          els.newComment.value = '';
+          setBanner('success', 'Commentaire ajouté.');
+          await reload();
+        }
+      } catch (e) {
+        setBanner('error', 'Erreur: ' + (e?.message || String(e)));
+      } finally {
+        els.commentBtn.disabled = false;
+      }
+    });
+
+    async function connectMcpApp() {
+      try {
+        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const { App, PostMessageTransport } = mod;
+        mcpApp = new App({ name: 'Trimble Connect BCF Detail', version: '1.0.0' });
+        mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
+        await mcpApp.connect(new PostMessageTransport(window.parent));
+      } catch (error) {
+        setBanner('error', 'MCP Apps SDK non chargé. Le résumé texte reste disponible dans le chat.');
+        console.error(error);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const params = event.data?.params || {};
+      const structured = params.structuredContent || params.result?.structuredContent;
+      if (structured) render(structured);
+    });
+
+    connectMcpApp();
+  </script>
+</body>
+</html>`;
+}
+
+// ── Selection review app (viewer bridge) ──
+
+function createSelectionReviewAppHtml(): string {
+  return String.raw`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Revue de sélection Trimble Connect</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Open Sans", Arial, sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #1e293b; }
+    .app { padding: 14px; }
+    .header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    .muted { color: #64748b; font-size: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .card { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; }
+    .card strong { display: block; font-size: 18px; margin-bottom: 2px; }
+    table { width: 100%; border-collapse: collapse; background: white; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; font-size: 12px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+    th { background: #f1f5f9; color: #334155; font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    .guids { color: #64748b; font-size: 11px; word-break: break-all; }
+    button { border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 12px; padding: 7px 10px; cursor: pointer; font-weight: 600; }
+    button.primary { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .empty, .error { padding: 18px; border: 1px dashed #cbd5e1; border-radius: 10px; background: white; color: #64748b; }
+    .error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+    .warn { padding: 8px 10px; border-radius: 8px; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; font-size: 12px; margin-bottom: 10px; display: none; }
+    .warn.show { display: block; }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <div class="header">
+      <div>
+        <h1>Revue de sélection — viewer 3D</h1>
+        <div class="muted" id="subtitle">En attente des données Agent Eyes...</div>
+      </div>
+      <button id="refreshBtn" class="primary" type="button">Rafraîchir</button>
+    </div>
+    <div id="staleWarn" class="warn"></div>
+    <section class="cards">
+      <div class="card"><strong id="selCount">-</strong><span class="muted">Objets sélectionnés</span></div>
+      <div class="card"><strong id="modelCount">-</strong><span class="muted">Modèles chargés</span></div>
+      <div class="card"><strong id="age">-</strong><span class="muted">Fraîcheur des données</span></div>
+    </section>
+    <div id="tableWrap" class="empty">La sélection du viewer va s'afficher ici.</div>
+    <div class="actions">
+      <button id="bcfBtn" type="button">Créer un BCF sur cette sélection</button>
+      <button id="todoBtn" type="button">Créer un ToDo</button>
+      <button id="propsBtn" type="button">Voir les propriétés</button>
+    </div>
+  </main>
+  <script type="module">
+    let mcpApp = null;
+    let data = null;
+    const els = {
+      subtitle: document.getElementById('subtitle'),
+      staleWarn: document.getElementById('staleWarn'),
+      selCount: document.getElementById('selCount'),
+      modelCount: document.getElementById('modelCount'),
+      age: document.getElementById('age'),
+      tableWrap: document.getElementById('tableWrap'),
+      refreshBtn: document.getElementById('refreshBtn'),
+      bcfBtn: document.getElementById('bcfBtn'),
+      todoBtn: document.getElementById('todoBtn'),
+      propsBtn: document.getElementById('propsBtn'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+
+    function render(newData) {
+      if (!newData || newData.mode !== 'review') return;
+      data = newData;
+      els.subtitle.textContent = (data.project?.name ? 'Projet ' + data.project.name + ' — ' : '') + 'capturé il y a ' + data.ageSeconds + ' s';
+      els.selCount.textContent = data.totalSelected;
+      els.modelCount.textContent = (data.models || []).length;
+      els.age.textContent = data.ageSeconds + ' s';
+      if (data.stale) {
+        els.staleWarn.className = 'warn show';
+        els.staleWarn.textContent = 'Données anciennes — vérifiez que le panneau Agent Eyes est toujours ouvert dans le viewer 3D.';
+      } else {
+        els.staleWarn.className = 'warn';
+      }
+      const rows = data.selection || [];
+      if (rows.length === 0) {
+        els.tableWrap.className = 'empty';
+        els.tableWrap.textContent = 'Aucun objet sélectionné dans le viewer. Sélectionnez des objets puis cliquez sur Rafraîchir.';
+        return;
+      }
+      els.tableWrap.className = '';
+      els.tableWrap.innerHTML = '<table><thead><tr><th>Modèle</th><th>Objets</th><th>GUIDs IFC</th></tr></thead><tbody>' +
+        rows.map(s => '<tr>' +
+          '<td>' + escapeHtml(s.modelName || s.modelId) + '</td>' +
+          '<td>' + s.count + '</td>' +
+          '<td><div class="guids">' + escapeHtml((s.guids || []).slice(0, 10).join(', ')) + ((s.guids || []).length > 10 ? ' … (+' + ((s.guids || []).length - 10) + ')' : '') + '</div></td>' +
+        '</tr>').join('') + '</tbody></table>';
+    }
+
+    async function refresh() {
+      if (!mcpApp?.callServerTool) return;
+      const result = await mcpApp.callServerTool({ name: 'tc_selection_review_app', arguments: {} });
+      if (!result.isError && result.structuredContent) render(result.structuredContent);
+      else {
+        els.tableWrap.className = 'error';
+        els.tableWrap.textContent = 'État du viewer indisponible. Ouvrez le panneau « Agent Eyes » dans le viewer 3D puis réessayez.';
+      }
+    }
+
+    async function ask(text) {
+      if (!mcpApp?.sendMessage) return;
+      await mcpApp.sendMessage({ role: 'user', content: [{ type: 'text', text }] });
+    }
+
+    els.refreshBtn.addEventListener('click', refresh);
+    els.bcfBtn.addEventListener('click', () => ask("Crée un BCF sur les objets actuellement sélectionnés dans mon viewer 3D et joins la vue 3D actuelle (caméra + capture + sélection). Demande-moi le titre et la priorité avant de créer."));
+    els.todoBtn.addEventListener('click', () => ask("Crée un ToDo concernant les objets actuellement sélectionnés dans mon viewer 3D. Demande-moi le titre avant de créer."));
+    els.propsBtn.addEventListener('click', () => ask("Affiche les propriétés (property sets) des objets actuellement sélectionnés dans mon viewer 3D."));
+
+    async function connectMcpApp() {
+      try {
+        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const { App, PostMessageTransport } = mod;
+        mcpApp = new App({ name: 'Trimble Connect Selection Review', version: '1.0.0' });
+        mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
+        await mcpApp.connect(new PostMessageTransport(window.parent));
+      } catch (error) {
+        els.tableWrap.className = 'error';
+        els.tableWrap.textContent = 'MCP Apps SDK non chargé. Le résumé texte reste disponible dans le chat.';
+        console.error(error);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const params = event.data?.params || {};
+      const structured = params.structuredContent || params.result?.structuredContent;
+      if (structured) render(structured);
+    });
+
+    connectMcpApp();
+  </script>
+</body>
+</html>`;
+}
+
+// ── Activity timeline app ──
+
+function buildActivityData(projectId: string, region: string, raw: unknown, limit: number) {
+  const activities = asRecordArray(raw)
+    .map((a) => {
+      const details = (typeof a.details === "object" && a.details !== null ? a.details : {}) as Record<string, unknown>;
+      const objects = asRecordArray(a.objects ?? details.objects);
+      const subject =
+        toText(details.name ?? details.title ?? details.label, "") ||
+        (objects.length > 0 ? objects.map((o) => toText(o.name ?? o.title ?? o.id)).slice(0, 3).join(", ") : "") ||
+        toText(a.objectName ?? a.object_name, "");
+      const dateIso = toText(a.createdOn ?? a.created_on ?? a.timestamp ?? a.modifiedOn, "");
+      return {
+        id: toText(a.id),
+        type: toText(a.activityType ?? a.activity_type ?? a.type ?? a.action),
+        actor: toText(a.createdBy ?? a.created_by ?? a.user ?? a.actor),
+        dateIso,
+        day: dateIso ? dateIso.substring(0, 10) : "-",
+        time: dateIso.length >= 16 ? dateIso.substring(11, 16) : "",
+        subject,
+        _sort: toEpoch(dateIso),
+      };
+    })
+    .sort((a, b) => b._sort - a._sort)
+    .slice(0, limit)
+    .map(({ _sort, ...rest }) => rest);
+  return {
+    mode: "timeline" as const,
+    projectId,
+    region,
+    generatedAt: new Date().toISOString(),
+    total: activities.length,
+    activities,
+  };
+}
+
+function createActivityTimelineAppHtml(): string {
+  return String.raw`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Activité du projet Trimble Connect</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Open Sans", Arial, sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #1e293b; }
+    .app { padding: 14px; }
+    .header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    .muted { color: #64748b; font-size: 12px; }
+    button { border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 12px; padding: 7px 9px; cursor: pointer; font-weight: 600; }
+    button.primary { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .chip { border: 1px solid #cbd5e1; border-radius: 999px; background: white; color: #334155; font-size: 12px; padding: 4px 10px; cursor: pointer; }
+    .chip.active { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    .day { font-size: 12px; font-weight: 700; color: #334155; margin: 14px 0 6px; }
+    .item { display: flex; gap: 10px; background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; }
+    .time { color: #64748b; min-width: 38px; }
+    .type { display: inline-block; padding: 1px 7px; border-radius: 999px; background: #e0f2fe; color: #0369a1; white-space: nowrap; margin-right: 6px; }
+    .empty, .error { padding: 18px; border: 1px dashed #cbd5e1; border-radius: 10px; background: white; color: #64748b; }
+    .error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <div class="header">
+      <div>
+        <h1>Activité du projet</h1>
+        <div class="muted" id="subtitle">En attente des données...</div>
+      </div>
+      <div style="display:flex; gap:8px">
+        <button id="askBtn" type="button">Demander une synthèse</button>
+        <button id="refreshBtn" class="primary" type="button">Rafraîchir</button>
+      </div>
+    </div>
+    <div class="filters" id="filters"></div>
+    <div id="listWrap" class="empty">La timeline va s'afficher ici.</div>
+  </main>
+  <script type="module">
+    let mcpApp = null;
+    let data = null;
+    let activeFilter = '';
+    const els = {
+      subtitle: document.getElementById('subtitle'),
+      filters: document.getElementById('filters'),
+      listWrap: document.getElementById('listWrap'),
+      refreshBtn: document.getElementById('refreshBtn'),
+      askBtn: document.getElementById('askBtn'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+
+    function category(type) {
+      const t = String(type || '').toUpperCase();
+      if (t.includes('FILE') || t.includes('FOLDER') || t.includes('VERSION')) return 'Fichiers';
+      if (t.includes('TOPIC') || t.includes('BCF') || t.includes('ISSUE')) return 'BCF';
+      if (t.includes('TODO') || t.includes('NOTE')) return 'ToDos';
+      if (t.includes('USER') || t.includes('MEMBER') || t.includes('INVIT')) return 'Membres';
+      if (t.includes('VIEW')) return 'Vues';
+      if (t.includes('SHARE') || t.includes('RELEASE')) return 'Partages';
+      return 'Autres';
+    }
+
+    function render(newData) {
+      if (!newData || newData.mode !== 'timeline') return;
+      data = newData;
+      els.subtitle.textContent = 'Projet ' + data.projectId + ' — ' + data.total + ' événement(s) — généré le ' + new Date(data.generatedAt).toLocaleString('fr-FR');
+      const cats = [...new Set((data.activities || []).map(a => category(a.type)))];
+      els.filters.innerHTML = '<span class="chip' + (activeFilter === '' ? ' active' : '') + '" data-cat="">Tout</span>' +
+        cats.map(c => '<span class="chip' + (activeFilter === c ? ' active' : '') + '" data-cat="' + escapeHtml(c) + '">' + escapeHtml(c) + '</span>').join('');
+      for (const chip of els.filters.querySelectorAll('.chip')) {
+        chip.addEventListener('click', () => { activeFilter = chip.getAttribute('data-cat'); render(data); });
+      }
+      renderList();
+    }
+
+    function renderList() {
+      const items = (data.activities || []).filter(a => !activeFilter || category(a.type) === activeFilter);
+      if (items.length === 0) {
+        els.listWrap.className = 'empty';
+        els.listWrap.textContent = 'Aucun événement pour ce filtre.';
+        return;
+      }
+      els.listWrap.className = '';
+      let html = '';
+      let lastDay = '';
+      for (const a of items) {
+        if (a.day !== lastDay) {
+          lastDay = a.day;
+          html += '<div class="day">' + escapeHtml(a.day) + '</div>';
+        }
+        html += '<div class="item"><span class="time">' + escapeHtml(a.time) + '</span><span>' +
+          '<span class="type">' + escapeHtml(category(a.type)) + '</span>' +
+          '<strong>' + escapeHtml(a.actor) + '</strong> — ' + escapeHtml(a.type) +
+          (a.subject ? ' : ' + escapeHtml(a.subject) : '') +
+        '</span></div>';
+      }
+      els.listWrap.innerHTML = html;
+    }
+
+    els.refreshBtn.addEventListener('click', async () => {
+      if (!data || !mcpApp?.callServerTool) return;
+      const result = await mcpApp.callServerTool({
+        name: 'tc_activity_timeline_app',
+        arguments: { region: data.region, projectId: data.projectId, limit: data.total || 20 },
+      });
+      if (!result.isError && result.structuredContent) render(result.structuredContent);
+    });
+    els.askBtn.addEventListener('click', async () => {
+      if (!mcpApp?.sendMessage) return;
+      await mcpApp.sendMessage({ role: 'user', content: [{ type: 'text', text: "Fais-moi une synthèse de l'activité récente du projet affichée dans la timeline." }] });
+    });
+
+    async function connectMcpApp() {
+      try {
+        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const { App, PostMessageTransport } = mod;
+        mcpApp = new App({ name: 'Trimble Connect Activity Timeline', version: '1.0.0' });
+        mcpApp.ontoolinput = () => {
+          els.listWrap.className = 'empty';
+          els.listWrap.textContent = "Chargement de l'activité...";
+        };
+        mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
+        await mcpApp.connect(new PostMessageTransport(window.parent));
+      } catch (error) {
+        els.listWrap.className = 'error';
+        els.listWrap.textContent = 'MCP Apps SDK non chargé. Le résumé texte reste disponible dans le chat.';
+        console.error(error);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const params = event.data?.params || {};
+      const structured = params.structuredContent || params.result?.structuredContent;
+      if (structured) render(structured);
+    });
+
+    connectMcpApp();
+  </script>
+</body>
+</html>`;
+}
+
 // ── Registration ──
 
 export function registerTcApps(
@@ -465,6 +1107,21 @@ export function registerTcApps(
   getToken: (extra: { sessionId?: string }) => string
 ): void {
   const regionEnum = z.enum(["us", "eu", "ap", "ap-au"]).describe("Trimble Connect region: us (North America), eu (Europe), ap (Asia-Pacific), ap-au (Australia)");
+
+  const registerAppResource = (name: string, uri: string, title: string, description: string, html: () => string) => {
+    const meta = { ...APP_CSP_META, "openai/widgetDescription": description, "openai/widgetPrefersBorder": true };
+    srv.registerResource(name, uri, { title, description, mimeType: "text/html+skybridge", _meta: meta }, async () => ({
+      contents: [{ uri, mimeType: "text/html+skybridge", text: html(), _meta: meta }],
+    }));
+  };
+
+  const appToolMeta = (uri: string, invoking: string, invoked: string) => ({
+    "ui": { "resourceUri": uri },
+    "openai/outputTemplate": uri,
+    "openai/widgetAccessible": true,
+    "openai/toolInvocation/invoking": invoking,
+    "openai/toolInvocation/invoked": invoked,
+  });
   srv.registerResource(
     "trimble-connect-todos-app",
     TODOS_APP_URI,
@@ -598,6 +1255,202 @@ export function registerTcApps(
           "openai/widgetAccessible": true,
           "openai/toolInvocation/invoked": "Tableau des fichiers prêt.",
         },
+      };
+    }
+  );
+
+  // ── BCF detail app ──
+
+  registerAppResource(
+    "trimble-connect-bcf-detail-app",
+    BCF_DETAIL_APP_URI,
+    "Détail d'un BCF Trimble Connect",
+    "Interactive MCP App card showing a BCF topic with comments, viewpoints and quick status/priority edits.",
+    createBcfDetailAppHtml
+  );
+
+  srv.registerTool(
+    "tc_bcf_detail_app",
+    {
+      title: "Afficher la fiche détail d'un BCF",
+      description: "Show an interactive MCP App card with the full detail of one BCF topic: description, status, priority, comments thread, attached viewpoints (snapshots loadable on click), plus inline actions to change status/priority and add a comment. Use this when the user asks to SEE the detail of a specific BCF (e.g. 'montre-moi le détail du BCF X'). Resolve the topic GUID first with tc_bcf action topics_list if the user gave a title. For plain data without UI, use tc_bcf action topic_get instead.",
+      inputSchema: {
+        region: regionEnum,
+        projectId: z.string().describe("Trimble Connect project ID"),
+        topicId: z.string().describe("GUID of the BCF topic"),
+        bcfVersion: z.enum(["2.1", "3.0"]).default("2.1").describe("BCF API version"),
+        snapshotViewpointId: z.string().optional().describe("If set, return the snapshot image (data URL) of this viewpoint instead of the topic detail (used internally by the app UI)"),
+      },
+      _meta: appToolMeta(BCF_DETAIL_APP_URI, "Chargement du BCF...", "Fiche BCF prête."),
+    },
+    async ({ region, projectId, topicId, bcfVersion, snapshotViewpointId }, extra) => {
+      const token = getToken(extra);
+
+      if (snapshotViewpointId) {
+        const rawToken = token.replace(/^Bearer\s+/i, "");
+        const url = `${getBcfBaseUrl(region as Region, bcfVersion)}/projects/${encodeURIComponent(projectId)}/topics/${encodeURIComponent(topicId)}/viewpoints/${encodeURIComponent(snapshotViewpointId)}/snapshot`;
+        try {
+          const res = await fetch(url, { headers: { Authorization: `Bearer ${rawToken}` } });
+          if (!res.ok) {
+            return { content: [{ type: "text" as const, text: `Snapshot indisponible (${res.status} ${res.statusText}).` }], isError: true };
+          }
+          const buffer = Buffer.from(await res.arrayBuffer());
+          if (buffer.byteLength > 3_000_000) {
+            return { content: [{ type: "text" as const, text: "Snapshot trop volumineux pour être affiché dans le chat." }], isError: true };
+          }
+          const contentType = res.headers.get("content-type")?.split(";")[0] || "image/png";
+          return {
+            content: [{ type: "text" as const, text: `Snapshot du viewpoint ${snapshotViewpointId} chargé.` }],
+            structuredContent: {
+              mode: "snapshot",
+              viewpointId: snapshotViewpointId,
+              dataUrl: `data:${contentType};base64,${buffer.toString("base64")}`,
+            },
+          };
+        } catch (error) {
+          return { content: [{ type: "text" as const, text: `Snapshot indisponible: ${String(error)}` }], isError: true };
+        }
+      }
+
+      const base = { region: region as Region, apiType: "bcf" as const, bcfVersion, authToken: token };
+      const [topicRes, commentsRes, viewpointsRes, extRes] = await Promise.all([
+        tcApiCall({ ...base, method: "GET", path: `/projects/${projectId}/topics/${topicId}` }),
+        tcApiCall({ ...base, method: "GET", path: `/projects/${projectId}/topics/${topicId}/comments` }),
+        tcApiCall({ ...base, method: "GET", path: `/projects/${projectId}/topics/${topicId}/viewpoints` }),
+        tcApiCall({ ...base, method: "GET", path: `/projects/${projectId}/extensions` }),
+      ]);
+
+      if (topicRes.status >= 400) {
+        const text = typeof topicRes.body === "string" ? topicRes.body : JSON.stringify(topicRes.body);
+        return { content: [{ type: "text" as const, text: `ERROR: GET topic → ${topicRes.status} ${topicRes.statusText}\n\n${text}` }], isError: true };
+      }
+      const rawTopic = (typeof topicRes.body === "object" && topicRes.body !== null ? topicRes.body : {}) as Record<string, unknown>;
+      const dataOut = buildBcfDetailData(
+        region as string,
+        projectId,
+        bcfVersion,
+        rawTopic,
+        commentsRes.status < 400 ? commentsRes.body : [],
+        viewpointsRes.status < 400 ? viewpointsRes.body : [],
+        extRes.status < 400 ? extRes.body : {}
+      );
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Fiche BCF affichée: « ${dataOut.topic.title} » (statut ${dataOut.topic.status}, priorité ${dataOut.topic.priority}) — ${dataOut.comments.length} commentaire(s), ${dataOut.viewpoints.length} vue(s). Les détails sont visibles dans la fiche interactive.`,
+        }],
+        structuredContent: dataOut,
+        _meta: appToolMeta(BCF_DETAIL_APP_URI, "Chargement du BCF...", "Fiche BCF prête."),
+      };
+    }
+  );
+
+  // ── Selection review app (viewer bridge) ──
+
+  registerAppResource(
+    "trimble-connect-selection-review-app",
+    SELECTION_REVIEW_APP_URI,
+    "Revue de sélection du viewer 3D",
+    "Interactive MCP App showing the objects currently selected in the user's 3D viewer, with quick actions.",
+    createSelectionReviewAppHtml
+  );
+
+  srv.registerTool(
+    "tc_selection_review_app",
+    {
+      title: "Afficher la revue de sélection du viewer 3D",
+      description: "Show an interactive MCP App that reviews the objects currently selected in the user's Trimble Connect 3D viewer (via the Agent Eyes extension): model, object count, IFC GUIDs, data freshness, with quick action buttons (create BCF, create ToDo, show properties). Use this when the user asks to review/see their current selection (e.g. 'fais une revue de ma sélection'). Requires the Agent Eyes panel open. For plain data without UI, use get_current_viewer_state instead.",
+      inputSchema: {},
+      _meta: appToolMeta(SELECTION_REVIEW_APP_URI, "Lecture de la sélection...", "Revue de sélection prête."),
+    },
+    async (_args, extra) => {
+      const token = getToken(extra);
+      const user = await resolveUserKeys(token);
+      const match = getViewerState(user.keys);
+      if (!match) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No viewer state available. Ask the user to open the 'Agent Eyes' extension panel in the Trimble Connect 3D viewer (left sidebar), then retry.",
+          }],
+          isError: true,
+        };
+      }
+      const state = match.entry.state;
+      const ageSeconds = Math.max(0, Math.round((Date.now() - match.entry.storedAt) / 1000));
+      const selection = (state.selection ?? []).map((s) => ({
+        modelId: s.modelId,
+        modelName: s.modelName ?? "",
+        count: s.externalIds?.length ?? s.objectRuntimeIds?.length ?? 0,
+        guids: (s.externalIds ?? []).slice(0, 50),
+      }));
+      const totalSelected = selection.reduce((sum, s) => sum + s.count, 0);
+      const dataOut = {
+        mode: "review" as const,
+        ageSeconds,
+        stale: ageSeconds > 120,
+        project: state.project ?? {},
+        models: (state.models ?? []).map((m) => ({ name: m.name ?? m.id })),
+        selection,
+        totalSelected,
+      };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Revue de sélection affichée: ${totalSelected} objet(s) sélectionné(s) dans ${selection.length} modèle(s), données capturées il y a ${ageSeconds} s. Le détail est visible dans le panneau interactif.`,
+        }],
+        structuredContent: dataOut,
+        _meta: appToolMeta(SELECTION_REVIEW_APP_URI, "Lecture de la sélection...", "Revue de sélection prête."),
+      };
+    }
+  );
+
+  // ── Activity timeline app ──
+
+  registerAppResource(
+    "trimble-connect-activity-timeline-app",
+    ACTIVITY_TIMELINE_APP_URI,
+    "Timeline d'activité du projet",
+    "Interactive MCP App timeline of recent Trimble Connect project events, filterable by category.",
+    createActivityTimelineAppHtml
+  );
+
+  srv.registerTool(
+    "tc_activity_timeline_app",
+    {
+      title: "Afficher la timeline d'activité du projet",
+      description: "Show an interactive MCP App timeline of the latest project events (file uploads, BCF, todos, members, views...) grouped by day and filterable by category. Use this when the user asks to SEE the recent project activity (e.g. 'montre-moi l'activité du projet cette semaine'). For plain data without UI, use tc_activities instead.",
+      inputSchema: {
+        region: regionEnum,
+        projectId: z.string().describe("Trimble Connect project ID"),
+        limit: z.number().min(1).max(100).default(20).describe("Number of most recent events to display"),
+      },
+      _meta: appToolMeta(ACTIVITY_TIMELINE_APP_URI, "Chargement de l'activité...", "Timeline prête."),
+    },
+    async ({ region, projectId, limit }, extra) => {
+      const token = getToken(extra);
+      let result = await tcApiCall({
+        method: "POST",
+        region: region as Region,
+        path: "/activities/list",
+        body: { objectType: "PROJECT", objectId: projectId, pageSize: limit },
+        authToken: token,
+      });
+      if (result.status >= 400) {
+        result = await tcApiCall({ method: "GET", region: region as Region, path: "/activities", query: { projectId }, authToken: token });
+      }
+      if (result.status >= 400) {
+        const text = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
+        return { content: [{ type: "text" as const, text: `ERROR: activities → ${result.status} ${result.statusText}\n\n${text}` }], isError: true };
+      }
+      const dataOut = buildActivityData(projectId, region as string, result.body, limit);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Timeline d'activité affichée: ${dataOut.total} événement(s) récents du projet ${projectId}. Le détail est visible dans la timeline interactive.`,
+        }],
+        structuredContent: dataOut,
+        _meta: appToolMeta(ACTIVITY_TIMELINE_APP_URI, "Chargement de l'activité...", "Timeline prête."),
       };
     }
   );
