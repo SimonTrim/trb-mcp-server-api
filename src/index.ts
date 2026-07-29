@@ -1550,6 +1550,19 @@ async function main() {
           storeSessionToken(sessionId, token);
         }
 
+        // Diagnostic logging for tool and resource traffic
+        const method = (req.body as { method?: string } | undefined)?.method;
+        if (method === "tools/call") {
+          const params = (req.body as { params?: { name?: string; arguments?: unknown } }).params;
+          const argKeys = params?.arguments && typeof params.arguments === "object" ? Object.keys(params.arguments as object).join(",") : "";
+          console.log(`[mcp] tools/call ${params?.name ?? "?"} args={${argKeys}} session=${sessionId ?? "-"}`);
+        } else if (method === "resources/read") {
+          const params = (req.body as { params?: { uri?: string } }).params;
+          console.log(`[mcp] resources/read ${params?.uri ?? "?"} session=${sessionId ?? "-"}`);
+        } else if (method === "resources/list") {
+          console.log(`[mcp] resources/list session=${sessionId ?? "-"}`);
+        }
+
         if (sessionId && transports[sessionId]) {
           await transports[sessionId].handleRequest(req, res, req.body);
           return;

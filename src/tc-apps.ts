@@ -1319,9 +1319,11 @@ export function registerTcApps(
         tcApiCall({ ...base, method: "GET", path: `/projects/${projectId}/topics/${topicId}/viewpoints` }),
         tcApiCall({ ...base, method: "GET", path: `/projects/${projectId}/extensions` }),
       ]);
+      console.log(`[bcf-detail-app] topic=${topicRes.status} comments=${commentsRes.status} viewpoints=${viewpointsRes.status} extensions=${extRes.status} (project=${projectId}, topic=${topicId}, bcf=${bcfVersion})`);
 
       if (topicRes.status >= 400) {
         const text = typeof topicRes.body === "string" ? topicRes.body : JSON.stringify(topicRes.body);
+        console.error(`[bcf-detail-app] topic GET failed: ${topicRes.status} — ${text.slice(0, 300)}`);
         return { content: [{ type: "text" as const, text: `ERROR: GET topic → ${topicRes.status} ${topicRes.statusText}\n\n${text}` }], isError: true };
       }
       const rawTopic = (typeof topicRes.body === "object" && topicRes.body !== null ? topicRes.body : {}) as Record<string, unknown>;
