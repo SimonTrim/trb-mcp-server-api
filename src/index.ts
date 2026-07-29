@@ -39,7 +39,7 @@ import { pitfallsDocs } from "./data/pitfalls.js";
 import { restApiExtendedDocs } from "./data/rest-api-extended.js";
 import { sdkDocs } from "./data/sdk.js";
 import { registerDomainTools } from "./tc-domain-tools.js";
-import { registerTcApps } from "./tc-apps.js";
+import { registerTcApps, EXT_APPS_SDK_URL, SERVER_ORIGIN } from "./tc-apps.js";
 import {
   storeViewerState,
   getViewerState,
@@ -269,7 +269,7 @@ function createBcfDashboardAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect BCF Dashboard', version: '1.0.0' });
         mcpApp.ontoolinput = () => {
@@ -482,7 +482,7 @@ function createBcfCreateAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect BCF Create', version: '1.0.0' });
         mcpApp.ontoolresult = ({ structuredContent }) => applyContext(structuredContent);
@@ -789,8 +789,8 @@ function createServer(): McpServer {
       _meta: {
         "ui": {
           "csp": {
-            "resource_domains": ["https://esm.sh"],
-            "connect_domains": ["https://esm.sh"],
+            "resource_domains": [SERVER_ORIGIN],
+            "connect_domains": [SERVER_ORIGIN],
           },
           "prefersBorder": true,
         },
@@ -807,8 +807,8 @@ function createServer(): McpServer {
           _meta: {
             "ui": {
               "csp": {
-                "resource_domains": ["https://esm.sh"],
-                "connect_domains": ["https://esm.sh"],
+                "resource_domains": [SERVER_ORIGIN],
+                "connect_domains": [SERVER_ORIGIN],
               },
               "prefersBorder": true,
             },
@@ -830,8 +830,8 @@ function createServer(): McpServer {
       _meta: {
         "ui": {
           "csp": {
-            "resource_domains": ["https://esm.sh"],
-            "connect_domains": ["https://esm.sh"],
+            "resource_domains": [SERVER_ORIGIN],
+            "connect_domains": [SERVER_ORIGIN],
           },
           "prefersBorder": true,
         },
@@ -848,8 +848,8 @@ function createServer(): McpServer {
           _meta: {
             "ui": {
               "csp": {
-                "resource_domains": ["https://esm.sh"],
-                "connect_domains": ["https://esm.sh"],
+                "resource_domains": [SERVER_ORIGIN],
+                "connect_domains": [SERVER_ORIGIN],
               },
               "prefersBorder": true,
             },
@@ -1705,6 +1705,27 @@ async function main() {
 
     app.get("/tc-extension/icon.png", (_req, res) => {
       res.type("png").send(Buffer.from(TC_EXTENSION_ICON_BASE64, "base64"));
+    });
+
+    // ── Self-hosted MCP Apps SDK bundle ──
+    // Served to the sandboxed MCP App iframes (origin "null"), hence the
+    // permissive CORS header. Built by esbuild at compile time (see package.json).
+    let extAppsBundleCache: Buffer | undefined;
+    app.get("/assets/ext-apps.js", async (_req, res) => {
+      try {
+        if (!extAppsBundleCache) {
+          const { readFile } = await import("node:fs/promises");
+          extAppsBundleCache = await readFile(new URL("./ext-apps.bundle.js", import.meta.url));
+        }
+        res.set({
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=3600",
+        }).send(extAppsBundleCache);
+      } catch (error) {
+        console.error(`[assets] ext-apps bundle unavailable: ${String(error)}`);
+        res.status(404).send("ext-apps bundle not found");
+      }
     });
 
     // ── Health check ──

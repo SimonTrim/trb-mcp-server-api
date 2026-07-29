@@ -22,11 +22,16 @@ const BCF_DETAIL_APP_URI = "ui://trimble-connect/bcf-detail.html";
 const SELECTION_REVIEW_APP_URI = "ui://trimble-connect/selection-review.html";
 const ACTIVITY_TIMELINE_APP_URI = "ui://trimble-connect/activity-timeline.html";
 
-const APP_CSP_META = {
+/** Public origin of this server — used by MCP App pages to load self-hosted assets. */
+export const SERVER_ORIGIN = process.env.PUBLIC_BASE_URL ?? "https://trb-mcp-server-api-256019753506.europe-west1.run.app";
+/** Self-hosted single-file bundle of @modelcontextprotocol/ext-apps (see /assets/ext-apps.js). */
+export const EXT_APPS_SDK_URL = `${SERVER_ORIGIN}/assets/ext-apps.js`;
+
+export const APP_CSP_META = {
   "ui": {
     "csp": {
-      "resource_domains": ["https://esm.sh"],
-      "connect_domains": ["https://esm.sh"],
+      "resource_domains": [SERVER_ORIGIN],
+      "connect_domains": [SERVER_ORIGIN],
     },
     "prefersBorder": true,
   },
@@ -188,7 +193,7 @@ function createTodosAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect ToDos', version: '1.0.0' });
         mcpApp.ontoolinput = () => {
@@ -425,7 +430,7 @@ function createFilesAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect Files', version: '1.0.0' });
         mcpApp.ontoolinput = () => {
@@ -743,7 +748,7 @@ function createBcfDetailAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect BCF Detail', version: '1.0.0' });
         mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
@@ -891,7 +896,7 @@ function createSelectionReviewAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect Selection Review', version: '1.0.0' });
         mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
@@ -1072,7 +1077,7 @@ function createActivityTimelineAppHtml(): string {
 
     async function connectMcpApp() {
       try {
-        const mod = await import('https://esm.sh/@modelcontextprotocol/ext-apps@latest');
+        const mod = await import('${EXT_APPS_SDK_URL}');
         const { App, PostMessageTransport } = mod;
         mcpApp = new App({ name: 'Trimble Connect Activity Timeline', version: '1.0.0' });
         mcpApp.ontoolinput = () => {
