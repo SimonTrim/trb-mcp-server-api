@@ -40,6 +40,7 @@ import { restApiExtendedDocs } from "./data/rest-api-extended.js";
 import { sdkDocs } from "./data/sdk.js";
 import { registerDomainTools } from "./tc-domain-tools.js";
 import { registerTcApps, EXT_APPS_SDK_URL, SERVER_ORIGIN } from "./tc-apps.js";
+import { registerTcAppsExtra } from "./tc-apps-extra.js";
 import {
   storeViewerState,
   getViewerState,
@@ -1490,6 +1491,7 @@ function createServer(): McpServer {
   );
 
   registerTcApps(srv, getToken);
+  registerTcAppsExtra(srv, getToken);
 
   registerDomainTools(srv, getToken);
 
