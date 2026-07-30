@@ -91,6 +91,31 @@ function onEvent(event, data) {
   }
 }
 
+// Trim the raw getObjectProperties result so the pushed payload stays small:
+// keep identity fields plus property sets as flat name/value pairs.
+const PROPS_MAX_OBJECTS = 20;
+const PROPS_MAX_GROUPS = 25;
+const PROPS_MAX_PER_GROUP = 50;
+function trimValue(v) {
+  if (v === null || v === undefined) return "";
+  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  return s.length > 200 ? s.slice(0, 200) + "…" : s;
+}
+function trimObjectProps(obj) {
+  const product = obj.product || {};
+  return {
+    runtimeId: obj.id,
+    class: obj.class,
+    name: product.name,
+    objectType: product.objectType,
+    description: product.description,
+    propertySets: (obj.properties || []).slice(0, PROPS_MAX_GROUPS).map((group) => ({
+      name: group.name,
+      props: (group.properties || []).slice(0, PROPS_MAX_PER_GROUP).map((p) => ({ name: p.name, value: trimValue(p.value) })),
+    })),
+  };
+}
+
 async function capture() {
   const state = { capturedAt: Date.now() };
 
@@ -105,6 +130,7 @@ async function capture() {
     const selection = await api.viewer.getSelection();
     const entries = [];
     let count = 0;
+    let propsBudget = PROPS_MAX_OBJECTS;
     for (const sel of selection || []) {
       const runtimeIds = (sel.objectRuntimeIds || []).slice(0, 500);
       count += runtimeIds.length;
@@ -112,6 +138,18 @@ async function capture() {
       try {
         entry.externalIds = await api.viewer.convertToObjectIds(sel.modelId, runtimeIds);
       } catch {}
+      if (propsBudget > 0 && runtimeIds.length > 0) {
+        const propIds = runtimeIds.slice(0, propsBudget);
+        try {
+          const rawProps = await api.viewer.getObjectProperties(sel.modelId, propIds);
+          entry.properties = (rawProps || []).map((obj, i) => {
+            const trimmed = trimObjectProps(obj);
+            if (entry.externalIds && entry.externalIds[i]) trimmed.externalId = entry.externalIds[i];
+            return trimmed;
+          });
+          propsBudget -= propIds.length;
+        } catch {}
+      }
       const model = (state.models || []).find((m) => m.id === sel.modelId);
       if (model) entry.modelName = model.name;
       entries.push(entry);

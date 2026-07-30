@@ -35,12 +35,28 @@ export interface ViewerCamera {
   projectionType?: string;
 }
 
+export interface SelectedObjectProperties {
+  /** Viewer runtime id of the object */
+  runtimeId?: number;
+  /** IFC GUID */
+  externalId?: string;
+  /** IFC class, e.g. IFCFLOWTERMINAL */
+  class?: string;
+  name?: string;
+  objectType?: string;
+  description?: string;
+  /** Property sets: group name + flattened name/value pairs */
+  propertySets?: { name?: string; props?: { name?: string; value?: unknown }[] }[];
+}
+
 export interface ViewerSelectionEntry {
   modelId: string;
   modelName?: string;
   objectRuntimeIds?: number[];
   /** IFC GUIDs resolved by the extension via convertToObjectIds */
   externalIds?: string[];
+  /** IFC properties captured by the extension via getObjectProperties (trimmed, max ~20 objects) */
+  properties?: SelectedObjectProperties[];
 }
 
 export interface ViewerState {

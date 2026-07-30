@@ -21,6 +21,7 @@ const FILES_APP_URI = "ui://trimble-connect/files.html";
 const BCF_DETAIL_APP_URI = "ui://trimble-connect/bcf-detail.html";
 const SELECTION_REVIEW_APP_URI = "ui://trimble-connect/selection-review.html";
 const ACTIVITY_TIMELINE_APP_URI = "ui://trimble-connect/activity-timeline.html";
+const OBJECT_PROPERTIES_APP_URI = "ui://trimble-connect/object-properties.html";
 
 /** Public origin of this server — used by MCP App pages to load self-hosted assets. */
 export const SERVER_ORIGIN = process.env.PUBLIC_BASE_URL ?? "https://trb-mcp-server-api-256019753506.europe-west1.run.app";
@@ -920,6 +921,156 @@ function createSelectionReviewAppHtml(): string {
 </html>`;
 }
 
+// ── Object properties app (viewer bridge) ──
+
+function createObjectPropertiesAppHtml(): string {
+  return String.raw`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Propriétés des objets sélectionnés</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Open Sans", Arial, sans-serif; }
+    body { margin: 0; background: #f8fafc; color: #1e293b; }
+    .app { padding: 14px; }
+    .header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    .muted { color: #64748b; font-size: 12px; }
+    button { border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #0f172a; font-size: 12px; padding: 7px 9px; cursor: pointer; font-weight: 600; }
+    button.primary { background: #0ea5e9; border-color: #0ea5e9; color: white; }
+    input { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 12px; }
+    .warn { display: none; background: #fef3c7; border: 1px solid #fcd34d; color: #92400e; border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 10px; }
+    .warn.show { display: block; }
+    .obj { background: white; border: 1px solid #e2e8f0; border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+    .obj-head { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
+    .obj-head h2 { font-size: 13px; margin: 0 0 2px; }
+    .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 11px; margin-right: 6px; }
+    .guid { color: #94a3b8; font-size: 11px; word-break: break-all; }
+    details { border-top: 1px solid #f1f5f9; }
+    summary { padding: 7px 12px; font-size: 12px; font-weight: 700; color: #334155; cursor: pointer; background: #f8fafc; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    td { padding: 5px 12px; border-top: 1px solid #f1f5f9; vertical-align: top; }
+    td.k { color: #64748b; width: 42%; }
+    td.v { word-break: break-word; }
+    .empty, .error { padding: 18px; border: 1px dashed #cbd5e1; border-radius: 10px; background: white; color: #64748b; }
+    .error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <div class="header">
+      <div>
+        <h1>Propriétés des objets sélectionnés</h1>
+        <div class="muted" id="subtitle">En attente des données...</div>
+      </div>
+      <button id="refreshBtn" class="primary" type="button">Rafraîchir</button>
+    </div>
+    <div id="staleWarn" class="warn"></div>
+    <input id="filter" type="search" placeholder="Filtrer par propriété ou valeur (ex: Volume, IFCFLOWTERMINAL, SR 861)..." />
+    <div id="listWrap" class="empty">Les propriétés des objets sélectionnés dans le viewer vont s'afficher ici.</div>
+  </main>
+  <script type="module">
+    let mcpApp = null;
+    let data = null;
+    const els = {
+      subtitle: document.getElementById('subtitle'),
+      staleWarn: document.getElementById('staleWarn'),
+      filter: document.getElementById('filter'),
+      listWrap: document.getElementById('listWrap'),
+      refreshBtn: document.getElementById('refreshBtn'),
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+
+    function renderList() {
+      if (!data) return;
+      const q = els.filter.value.trim().toLowerCase();
+      const objects = data.objects || [];
+      if (objects.length === 0) {
+        els.listWrap.className = 'empty';
+        els.listWrap.textContent = 'Aucun objet sélectionné dans le viewer. Sélectionnez des objets puis cliquez sur Rafraîchir.';
+        return;
+      }
+      const html = objects.map((obj, idx) => {
+        const identity = [obj.name, obj.objectType, obj.class, obj.externalId, obj.modelName].join(' ').toLowerCase();
+        const groups = (obj.propertySets || []).map((g, gi) => {
+          let props = g.props || [];
+          if (q && !identity.includes(q)) {
+            props = props.filter(p => (String(p.name ?? '') + ' ' + String(p.value ?? '')).toLowerCase().includes(q));
+          }
+          if (q && props.length === 0 && !(String(g.name ?? '').toLowerCase().includes(q)) && !identity.includes(q)) return '';
+          return '<details' + (q || gi === 0 ? ' open' : '') + '><summary>' + escapeHtml(g.name || 'Propriétés') + ' (' + props.length + ')</summary>' +
+            '<table><tbody>' + props.map(p => '<tr><td class="k">' + escapeHtml(p.name) + '</td><td class="v">' + escapeHtml(p.value) + '</td></tr>').join('') + '</tbody></table></details>';
+        }).filter(Boolean).join('');
+        if (q && !identity.includes(q) && groups === '') return '';
+        return '<div class="obj"><div class="obj-head">' +
+          '<h2>' + escapeHtml(obj.name || 'Objet ' + (idx + 1)) + '</h2>' +
+          '<div>' + (obj.class ? '<span class="badge">' + escapeHtml(obj.class) + '</span>' : '') +
+          (obj.objectType ? '<span class="badge">' + escapeHtml(obj.objectType) + '</span>' : '') +
+          (obj.modelName ? '<span class="muted">' + escapeHtml(obj.modelName) + '</span>' : '') + '</div>' +
+          (obj.externalId ? '<div class="guid">GUID ' + escapeHtml(obj.externalId) + '</div>' : '') +
+          '</div>' + groups + '</div>';
+      }).filter(Boolean).join('');
+      els.listWrap.className = '';
+      els.listWrap.innerHTML = html || '<div class="empty">Aucune propriété ne correspond au filtre.</div>';
+    }
+
+    function render(newData) {
+      if (!newData || newData.mode !== 'properties') return;
+      data = newData;
+      els.subtitle.textContent = (data.project?.name ? 'Projet ' + data.project.name + ' — ' : '') +
+        data.totalSelected + ' objet(s) sélectionné(s), propriétés de ' + (data.objects || []).length + ' objet(s) — capturé il y a ' + data.ageSeconds + ' s';
+      if (data.stale) {
+        els.staleWarn.className = 'warn show';
+        els.staleWarn.textContent = 'Données anciennes — vérifiez que le panneau Agent Eyes est toujours ouvert dans le viewer 3D.';
+      } else {
+        els.staleWarn.className = 'warn';
+      }
+      renderList();
+    }
+
+    async function refresh() {
+      if (!mcpApp?.callServerTool) return;
+      const result = await mcpApp.callServerTool({ name: 'tc_object_properties_app', arguments: {} });
+      if (!result.isError && result.structuredContent) render(result.structuredContent);
+      else {
+        els.listWrap.className = 'error';
+        els.listWrap.textContent = 'État du viewer indisponible. Ouvrez le panneau « Agent Eyes » dans le viewer 3D puis réessayez.';
+      }
+    }
+
+    els.refreshBtn.addEventListener('click', refresh);
+    els.filter.addEventListener('input', renderList);
+
+    async function connectMcpApp() {
+      try {
+        const mod = await import('${EXT_APPS_SDK_URL}');
+        const { App, PostMessageTransport } = mod;
+        mcpApp = new App({ name: 'Trimble Connect Object Properties', version: '1.0.0' });
+        mcpApp.ontoolresult = ({ structuredContent }) => render(structuredContent);
+        await mcpApp.connect(new PostMessageTransport(window.parent));
+      } catch (error) {
+        els.listWrap.className = 'error';
+        els.listWrap.textContent = 'MCP Apps SDK non chargé. Le résumé texte reste disponible dans le chat.';
+        console.error(error);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const params = event.data?.params || {};
+      const structured = params.structuredContent || params.result?.structuredContent;
+      if (structured) render(structured);
+    });
+
+    connectMcpApp();
+  </script>
+</body>
+</html>`;
+}
+
 // ── Activity timeline app ──
 
 function buildActivityData(projectId: string, region: string, raw: unknown, limit: number) {
@@ -1458,6 +1609,85 @@ export function registerTcApps(
         }],
         structuredContent: dataOut,
         _meta: appToolMeta(ACTIVITY_TIMELINE_APP_URI, "Chargement de l'activité...", "Timeline prête."),
+      };
+    }
+  );
+
+  // ── Object properties app (viewer bridge) ──
+
+  registerAppResource(
+    "trimble-connect-object-properties-app",
+    OBJECT_PROPERTIES_APP_URI,
+    "Propriétés des objets sélectionnés",
+    "Interactive MCP App showing the IFC properties (name, object type, class, property sets) of the objects currently selected in the user's 3D viewer.",
+    createObjectPropertiesAppHtml
+  );
+
+  srv.registerTool(
+    "tc_object_properties_app",
+    {
+      title: "Afficher les propriétés des objets sélectionnés",
+      description: "Show an interactive MCP App with the IFC properties of the objects currently selected in the user's Trimble Connect 3D viewer (via the Agent Eyes extension): name, object type, IFC class, GUID, and all property sets (calculated geometry, bounding box, custom psets...) as filterable tables. ALWAYS use this tool when the user asks to see/display the properties of their selection (e.g. 'affiche les propriétés des objets sélectionnés', 'quel est le type d'objet ?'). Do NOT use model_search or the model gateway for this. Requires the Agent Eyes panel open in the viewer.",
+      inputSchema: {},
+      _meta: appToolMeta(OBJECT_PROPERTIES_APP_URI, "Lecture des propriétés...", "Propriétés prêtes."),
+    },
+    async (_args, extra) => {
+      const token = getToken(extra);
+      const user = await resolveUserKeys(token);
+      const match = getViewerState(user.keys);
+      if (!match) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No viewer state available. Ask the user to open the 'Agent Eyes' extension panel in the Trimble Connect 3D viewer (left sidebar), then retry.",
+          }],
+          isError: true,
+        };
+      }
+      const state = match.entry.state;
+      const ageSeconds = Math.max(0, Math.round((Date.now() - match.entry.storedAt) / 1000));
+      const objects: Record<string, unknown>[] = [];
+      let totalSelected = 0;
+      for (const sel of state.selection ?? []) {
+        totalSelected += sel.externalIds?.length ?? sel.objectRuntimeIds?.length ?? 0;
+        for (const obj of sel.properties ?? []) {
+          objects.push({ ...obj, modelName: sel.modelName ?? sel.modelId });
+        }
+      }
+      if (totalSelected === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No objects are currently selected in the 3D viewer. Ask the user to select objects, then retry.",
+          }],
+          isError: true,
+        };
+      }
+      if (objects.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `${totalSelected} object(s) selected but no properties were captured yet. The Agent Eyes extension may need a few seconds (or a refresh of the Trimble Connect page to load its latest version). Retry shortly.`,
+          }],
+          isError: true,
+        };
+      }
+      const dataOut = {
+        mode: "properties" as const,
+        ageSeconds,
+        stale: ageSeconds > 120,
+        project: state.project ?? {},
+        totalSelected,
+        objects,
+      };
+      const names = objects.map((o) => String((o as { name?: unknown }).name ?? "?")).slice(0, 5).join(", ");
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Propriétés affichées pour ${objects.length} objet(s) sélectionné(s) (${names}${objects.length > 5 ? ", …" : ""}) — capturées il y a ${ageSeconds} s. Le détail (property sets complets) est visible dans le panneau interactif.`,
+        }],
+        structuredContent: dataOut,
+        _meta: appToolMeta(OBJECT_PROPERTIES_APP_URI, "Lecture des propriétés...", "Propriétés prêtes."),
       };
     }
   );
