@@ -1627,7 +1627,7 @@ export function registerTcApps(
     "tc_object_properties_app",
     {
       title: "Afficher les propriétés des objets sélectionnés",
-      description: "Show an interactive MCP App with the IFC properties of the objects currently selected in the user's Trimble Connect 3D viewer (via the Agent Eyes extension): name, object type, IFC class, GUID, and all property sets (calculated geometry, bounding box, custom psets...) as filterable tables. ALWAYS use this tool when the user asks to see/display the properties of their selection (e.g. 'affiche les propriétés des objets sélectionnés', 'quel est le type d'objet ?'). Do NOT use model_search or the model gateway for this. Requires the Agent Eyes panel open in the viewer.",
+      description: "Show an interactive MCP App (UI table) with the IFC properties of the objects currently selected in the user's 3D viewer (via Agent Eyes). Use ONLY when the user explicitly wants to SEE/DISPLAY properties in the chat UI (e.g. 'affiche les propriétés de ma sélection'). For automation (filter by property, Organizer grouping, read Geom-Ø/layers): use built-in model_search/get_model_layers/get_property_set_properties and MCP tc_model_entities — do NOT require Agent Eyes. Requires the Agent Eyes panel open.",
       inputSchema: {},
       _meta: appToolMeta(OBJECT_PROPERTIES_APP_URI, "Lecture des propriétés...", "Propriétés prêtes."),
     },

@@ -39,6 +39,7 @@ import { pitfallsDocs } from "./data/pitfalls.js";
 import { restApiExtendedDocs } from "./data/rest-api-extended.js";
 import { sdkDocs } from "./data/sdk.js";
 import { registerDomainTools } from "./tc-domain-tools.js";
+import { registerModelTools } from "./tc-model-tools.js";
 import { registerTcApps, EXT_APPS_SDK_URL, SERVER_ORIGIN } from "./tc-apps.js";
 import { registerTcAppsExtra } from "./tc-apps-extra.js";
 import {
@@ -869,7 +870,10 @@ function createServer(): McpServer {
       method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method"),
       region: regionEnum,
       path: z.string().describe("API path (e.g. /projects, /files/{fileId}, /todos). Do NOT include the base URL."),
-      apiType: z.enum(["core", "bcf"]).default("core").describe("API type: core (/tc/api/2.0) or bcf (/bcf/2.1)"),
+      apiType: z
+        .enum(["core", "bcf", "model"])
+        .default("core")
+        .describe("API type: core (/tc/api/2.0), bcf (/bcf/2.1), or model (Model API — path like /models/{versionId}/entities)"),
       query: z.record(z.string(), z.string()).optional().describe("Query parameters as key-value pairs (e.g. {projectId: '...', type: 'FILE'})"),
       body: z.any().optional().describe("Request body for POST/PUT/PATCH (JSON object)"),
     },
@@ -1494,6 +1498,7 @@ function createServer(): McpServer {
   registerTcAppsExtra(srv, getToken);
 
   registerDomainTools(srv, getToken);
+  registerModelTools(srv, getToken);
 
   return srv;
 }

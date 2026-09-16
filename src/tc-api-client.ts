@@ -12,6 +12,13 @@ const BCF_HOSTS: Record<string, string> = {
   "ap-au": "open32.connect.trimble.com",
 };
 
+const MODEL_HOSTS: Record<string, string> = {
+  us: "model-api.connect.trimble.com",
+  eu: "model-api21.connect.trimble.com",
+  ap: "model-api31.connect.trimble.com",
+  "ap-au": "model-api32.connect.trimble.com",
+};
+
 export type Region = "us" | "eu" | "ap" | "ap-au";
 
 /**
@@ -21,8 +28,9 @@ export type Region = "us" | "eu" | "ap" | "ap-au";
  * - bcf-root: BCF/Topic host without version prefix (e.g. /bcf/versions, /foundation/...)
  * - pset:     Property Set Service  (regional URI resolved from GET /regions)
  * - org:      Organizer Service     (regional URI resolved from GET /regions)
+ * - model:    Model API             (regional URI resolved from GET /regions or MODEL_HOSTS fallback)
  */
-export type ApiType = "core" | "bcf" | "bcf-root" | "pset" | "org";
+export type ApiType = "core" | "bcf" | "bcf-root" | "pset" | "org" | "model";
 
 export function getCoreBaseUrl(region: Region, path = ""): string {
   const host = CORE_HOSTS[region] || CORE_HOSTS.us;
@@ -38,6 +46,11 @@ export function getBcfBaseUrl(region: Region, bcfVersion = "2.1"): string {
 
 export function getBcfRootUrl(region: Region): string {
   const host = BCF_HOSTS[region] || BCF_HOSTS.us;
+  return `https://${host}`;
+}
+
+export function getModelBaseUrl(region: Region): string {
+  const host = MODEL_HOSTS[region] || MODEL_HOSTS.us;
   return `https://${host}`;
 }
 
@@ -87,7 +100,11 @@ async function fetchRegions(authToken: string): Promise<RegionEntry[]> {
   return data;
 }
 
-async function resolveServiceUri(region: Region, service: "pset-api" | "org-api", authToken: string): Promise<string> {
+async function resolveServiceUri(
+  region: Region,
+  service: "pset-api" | "org-api" | "model-api",
+  authToken: string
+): Promise<string> {
   const regions = await fetchRegions(authToken);
   const host = CORE_HOSTS[region] || CORE_HOSTS.us;
   const entry = regions.find((r) => r.origin === host) ?? regions.find((r) => r.isMaster === true);
@@ -126,6 +143,12 @@ async function getBaseUrl(opts: TcApiCallOptions): Promise<string> {
       return resolveServiceUri(opts.region, "pset-api", opts.authToken);
     case "org":
       return resolveServiceUri(opts.region, "org-api", opts.authToken);
+    case "model":
+      try {
+        return await resolveServiceUri(opts.region, "model-api", opts.authToken);
+      } catch {
+        return getModelBaseUrl(opts.region);
+      }
     default:
       return getCoreBaseUrl(opts.region, opts.path);
   }
